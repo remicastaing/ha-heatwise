@@ -1,0 +1,30 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Installer Heatwise",
+        "description": "Confirmer l'installation de Heatwise. Toute la configuration (pièces, radiateurs, capteurs) se fait ensuite depuis le panneau Heatwise de la barre latérale.",
+        "data": {
+          "port": "Port du dongle RFPlayer"
+        },
+        "data_description": {
+          "port": "Chemin du périphérique série (ex. /dev/ttyUSB0) ou URL réseau (ex. socket://mon-mac:4000) — nécessaire pour appairer et piloter les radiateurs."
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigurer Heatwise",
+        "description": "Modifier le port du dongle RFPlayer utilisé par Heatwise.",
+        "data": {
+          "port": "Port du dongle RFPlayer"
+        },
+        "data_description": {
+          "port": "Chemin du périphérique série (ex. /dev/ttyUSB0) ou URL réseau (ex. socket://mon-mac:4000)."
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Heatwise est déjà installé.",
+      "reconfigure_successful": "Le port du dongle RFPlayer a été mis à jour."
+    }
+  }
+}

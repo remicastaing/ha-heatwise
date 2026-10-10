@@ -1,0 +1,30 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Install Heatwise",
+        "description": "Confirm the Heatwise installation. All further configuration (rooms, radiators, sensors) is done from the Heatwise sidebar panel.",
+        "data": {
+          "port": "RFPlayer dongle port"
+        },
+        "data_description": {
+          "port": "Serial device path (e.g. /dev/ttyUSB0) or network URL (e.g. socket://my-mac:4000) — required to pair and control radiators."
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Heatwise",
+        "description": "Change the RFPlayer dongle port used by Heatwise.",
+        "data": {
+          "port": "RFPlayer dongle port"
+        },
+        "data_description": {
+          "port": "Serial device path (e.g. /dev/ttyUSB0) or network URL (e.g. socket://my-mac:4000)."
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Heatwise is already configured.",
+      "reconfigure_successful": "The RFPlayer dongle port has been updated."
+    }
+  }
+}
