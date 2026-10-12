@@ -32,3 +32,22 @@ PAIRING_DURATION = timedelta(seconds=180)
 PAIRING_CONFIG_TIMEOUT = timedelta(seconds=120)
 PAIRING_ENTITIES_TIMEOUT = timedelta(seconds=10)
 PAIRING_SETTLE_DELAY = timedelta(seconds=2)
+# Attente des capteurs après le rechargement de ZHA qui répare une sonde
+# appairée sans capteurs (research R4ter).
+PAIRING_RELOAD_ENTITIES_TIMEOUT = timedelta(seconds=30)
+
+# --- Régulation automatique (spec 008) ---
+# Événement émis quand l'état de régulation d'une ou plusieurs pièces
+# change, avec `{"room_ids": [...]}` (research R8).
+EVENT_REGULATION_UPDATED = "heatwise_regulation_updated"
+# Signal dispatcher interne émis après ajout ou suppression d'un
+# radiateur : la régulation réévalue toutes les pièces (research R4).
+SIGNAL_RADIATORS_CHANGED = "heatwise_radiators_changed"
+# Réévaluation au moins chaque minute à défaut d'événement (FR-007).
+REGULATION_TICK = timedelta(seconds=60)
+# Renvoi de l'ordre courant, bien en dessous de la coupure matérielle
+# d'1 h du récepteur X2D (FR-013, research R5).
+REGULATION_RESEND = timedelta(minutes=15)
+# Suspension de la régulation d'une pièce après une action manuelle
+# (FR-015, research R6).
+MANUAL_SUSPENSION = timedelta(hours=1)

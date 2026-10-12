@@ -49,6 +49,47 @@ function formatLastMeasure(iso) {
   return `dernière mesure ${moment.startsWith("le ") ? moment : `à ${moment}`}`;
 }
 
+// Spec 008 : libellé de l'état de régulation d'une pièce (contrat
+// websocket-api.md). `kind` choisit le style : heating, idle, alert.
+function regulationLabel(regulation) {
+  const { status, reason, suspended_until: until } = regulation;
+  switch (status) {
+    case "heating":
+      return { kind: "heating", icon: "mdi:fire", text: "Chauffe" };
+    case "idle":
+      return {
+        kind: "idle",
+        icon: "mdi:thermostat-auto",
+        text: reason === "target_reached" ? "Consigne atteinte" : "Régulée",
+      };
+    case "safety_stop": {
+      const why = {
+        sensor_unavailable: "sonde indisponible",
+        sensor_stale: "sonde muette",
+        dongle_unreachable: "dongle injoignable",
+      }[reason] || reason;
+      return { kind: "alert", icon: "mdi:alert-outline", text: `Arrêt de sécurité : ${why}` };
+    }
+    case "suspended":
+      return {
+        kind: "idle",
+        icon: "mdi:hand-back-right-outline",
+        text: `Régulation suspendue (manuel)${until ? ` jusqu'à ${formatMoment(until)}` : ""}`,
+      };
+    case "not_regulated":
+      return {
+        kind: "idle",
+        icon: "mdi:thermostat-off",
+        text:
+          reason === "rfplayer_not_configured"
+            ? "Non régulée : dongle non configuré"
+            : "Non régulée : pas de sonde",
+      };
+    default:
+      return null;
+  }
+}
+
 // Recherche insensible à la casse et aux accents.
 function normalizeSearch(text) {
   return (text || "")
@@ -429,6 +470,29 @@ class HeatwisePanel extends LitElement {
 
     .room-row .current-temperature {
       font-size: 18px;
+    }
+
+    .regulation {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex-basis: 100%;
+      font-size: 13px;
+      color: var(--hw-text-secondary);
+      --mdc-icon-size: 16px;
+    }
+
+    .regulation.heating {
+      color: var(--hw-accent);
+      font-weight: 600;
+    }
+
+    .regulation.alert {
+      color: var(--error-color, #b3261e);
+    }
+
+    .room-row .regulation {
+      flex-basis: auto;
     }
 
     .target-temperature-icon {
@@ -864,13 +928,32 @@ class HeatwisePanel extends LitElement {
       this._loadGeneralSettings();
       // `area_registry_updated` : association de sonde faite depuis
       // Heatwise ou depuis Paramètres → Zones (spec 006, research R7).
-      for (const eventType of ["heatwise_schedule_updated", "area_registry_updated"]) {
+      // `heatwise_regulation_updated` : état de régulation d'une pièce
+      // changé (spec 008, research R8).
+      for (const eventType of [
+        "heatwise_schedule_updated",
+        "area_registry_updated",
+        "heatwise_regulation_updated",
+      ]) {
         this.hass.connection
-          .subscribeEvents(() => this._loadRooms(), eventType)
+          .subscribeEvents(() => this._onRoomsChanged(eventType), eventType)
           .then((unsub) => {
             this._unsubEvents.push(unsub);
           });
       }
+    }
+  }
+
+  _onRoomsChanged(eventType) {
+    this._loadRooms();
+    // La régulation change l'état de chauffe des radiateurs : rafraîchir
+    // la fenêtre de la pièce si elle est ouverte (spec 008).
+    if (
+      eventType === "heatwise_regulation_updated" &&
+      this._settingsDialog &&
+      !this._settingsDialog.loading
+    ) {
+      this._loadSettingsRadiators();
     }
   }
 
@@ -1322,13 +1405,16 @@ class HeatwisePanel extends LitElement {
       case "detected":
         this._sensorPairing = { ...current, step: "detected" };
         return;
+      case "repairing":
+        this._sensorPairing = { ...current, step: "repairing", event };
+        return;
       case "not_a_sensor":
         if (!event.final) {
           this._sensorPairing = {
             ...current,
             step: current.step === "detected" ? "waiting" : current.step,
             notice: event.entities_missing
-              ? `« ${event.device_name} » a rejoint le réseau, mais Home Assistant n'a pas créé ses capteurs. Redémarrez Home Assistant, puis associez la sonde depuis la liste. L'attente continue pour une autre sonde.`
+              ? `« ${event.device_name} » a rejoint le réseau, mais Home Assistant n'a pas créé ses capteurs, même après rechargement de Zigbee. Redémarrez Home Assistant, puis associez la sonde depuis la liste. L'attente continue pour une autre sonde.`
               : `« ${event.device_name} » a rejoint le réseau mais ne mesure pas la température : il reste dans Home Assistant, sans être associé. L'attente continue.`,
           };
           return;
@@ -1931,8 +2017,8 @@ class HeatwisePanel extends LitElement {
               l'icône réseau de l'écran clignote.
             </li>
             <li>
-              Relâchez et n'appuyez plus : un nouvel appui relance la
-              configuration de la sonde et peut l'empêcher d'aboutir.
+              Relâchez et n'appuyez plus : la configuration peut prendre
+              jusqu'à une minute, gardez la sonde près du coordinateur.
             </li>
           </ol>
           <p class="pairing-countdown" aria-live="polite">
@@ -1951,6 +2037,20 @@ class HeatwisePanel extends LitElement {
           </p>
           <p class="hint">Gardez la sonde près du coordinateur jusqu'à la fin.</p>
           ${noticeBlock}
+          <div class="dialog-actions">${stop}</div>
+        `;
+        break;
+      case "repairing":
+        content = html`
+          <p class="pairing-status">
+            <ha-icon icon="mdi:access-point-network"></ha-icon>
+            Finalisation de la configuration…
+          </p>
+          <p class="hint">
+            Home Assistant n'a pas encore créé les capteurs de « ${event.device_name} » :
+            Heatwise recharge l'intégration Zigbee. Les appareils Zigbee sont
+            indisponibles quelques secondes.
+          </p>
           <div class="dialog-actions">${stop}</div>
         `;
         break;
@@ -2003,14 +2103,12 @@ class HeatwisePanel extends LitElement {
           ? html`
               <p class="pairing-status">
                 « ${event.device_name} » est appairée, mais Home Assistant n'a pas
-                créé ses capteurs.
+                créé ses capteurs, même après rechargement de Zigbee.
               </p>
               <p class="hint">
-                Cela arrive quand la sonde se réannonce pendant sa configuration
-                (bouton appuyé plusieurs fois). Redémarrez Home Assistant : ses
-                capteurs de température et d'humidité seront créés. Associez-la
-                ensuite depuis la liste « Associer une sonde » ; inutile de
-                l'appairer à nouveau.
+                Redémarrez Home Assistant : ses capteurs de température et
+                d'humidité seront créés. Associez-la ensuite depuis la liste
+                « Associer une sonde » ; inutile de l'appairer à nouveau.
               </p>
               <div class="dialog-actions">${back}</div>
             `
@@ -2319,8 +2417,10 @@ class HeatwisePanel extends LitElement {
             </div>
           </div>
           <p class="hint">
-            Mettez le récepteur du radiateur en attente d'appairage (voyant
-            TH clignotant), puis cliquez sur « C'est fait ». Ce radiateur
+            Mettez le récepteur du radiateur en attente d'appairage par un
+            appui bref : le voyant TH doit clignoter en vert (un voyant jaune
+            signale la voie AUX, à éviter : recommencez avec un appui plus
+            court). Cliquez ensuite sur « C'est fait ». Ce radiateur
             s'ajoutera à ceux déjà présents dans ${room.name}.
           </p>
           <p class="hint">
@@ -2484,7 +2584,21 @@ class HeatwisePanel extends LitElement {
                 Radiateur
               </button>
             `}
+        ${this._renderRegulation(room)}
       </div>
+    `;
+  }
+
+  // État de la régulation automatique sous les mesures (spec 008, FR-017).
+  _renderRegulation(room) {
+    const label = room.regulation ? regulationLabel(room.regulation) : null;
+    if (!label) {
+      return "";
+    }
+    return html`
+      <span class="regulation ${label.kind}">
+        <ha-icon icon=${label.icon}></ha-icon>${label.text}
+      </span>
     `;
   }
 

@@ -7,7 +7,9 @@ ouvre la connexion série au dongle RFPlayer si un port est configuré
 antérieure à la spec 003, cf. `research.md`) : le panneau et les pièces
 restent disponibles, seules les commandes radiateurs répondent
 `rfplayer_not_configured`. Au démarrage, tous les radiateurs déjà
-enregistrés sont forcés à l'arrêt (FR-021, principe I de la constitution).
+enregistrés sont forcés à l'arrêt (FR-021, principe I de la constitution),
+puis la régulation automatique démarre (spec 008, `regulator.py`) : elle
+ne rallume une pièce que sur une mesure valide de sa sonde.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from homeassistant.core import HomeAssistant
 
 from . import radiators, websocket_api
 from .const import DOMAIN
+from .regulator import Regulator
 from .rfplayer_client import RFPlayerClient
 
 PANEL_DIR = Path(__file__).parent / "panel"
@@ -56,6 +59,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # non avant l'arrêt de Home Assistant.
     await radiators.async_force_stop_all(hass, client)
 
+    # Spec 008 : la régulation ne reprend qu'après cet arrêt (FR-011).
+    regulator = Regulator(hass, client)
+    hass.data[DOMAIN]["regulator"] = regulator
+    await regulator.async_start()
+
     return True
 
 
@@ -65,13 +73,21 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except KeyError:
         pass
 
+    domain_data = hass.data.get(DOMAIN)
+    # Spec 008 (research R7) : arrêter la régulation, puis les radiateurs
+    # (best-effort), pour qu'aucun ne chauffe sans pilote après le
+    # déchargement.
+    regulator = domain_data.pop("regulator", None) if domain_data else None
+    if regulator is not None:
+        await regulator.async_stop()
+        await radiators.async_force_stop_all(hass, regulator.client)
+
     # Annuler les minuteries de chauffe manuelle *avant* de fermer le
     # client : une minuterie planifiée par `radiators.async_set_heating`
     # referme sur l'instance de client courante et ne doit jamais
     # s'exécuter après sa fermeture (cf. research.md).
     radiators.async_cancel_all_auto_off_timers(hass)
 
-    domain_data = hass.data.get(DOMAIN)
     if domain_data is not None:
         client = domain_data.pop("client", None)
         if client is not None:

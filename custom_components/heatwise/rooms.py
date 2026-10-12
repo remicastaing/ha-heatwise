@@ -7,7 +7,7 @@ existants (Area registry, Entity registry, states), le stockage des
 radiateurs (`radiators.py`, spec 003) pour `has_radiator`, et celui de la
 programmation (`schedules_store.py`, spec 005) pour `target_temperature`,
 les sondes (`sensors.py`, spec 006) pour l'humidité, la pile et la
-péremption, et retourne la forme documentée dans data-model.md / contracts/websocket-api.md.
+péremption, l'état de la régulation (`regulator.py`, spec 008), et retourne la forme documentée dans data-model.md / contracts/websocket-api.md.
 """
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.util import dt as dt_util
 
 from . import radiators as radiators_module
+from . import regulator as regulator_module
 from . import schedule as schedule_module
 from . import schedules_store
 from . import sensors as sensors_module
@@ -34,6 +35,7 @@ def _assemble_room(
     *,
     has_radiator: bool = False,
     target_temperature: float | None = None,
+    regulation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # Home Assistant expose nativement un capteur de température par Area
     # (`AreaEntry.temperature_entity_id`) — pas besoin de le rechercher
@@ -80,6 +82,9 @@ def _assemble_room(
         # plage, pour les pièces avec radiateur ; aucun pilotage des
         # radiateurs n'en découle (FR-029). `None` sans radiateur.
         "target_temperature": target_temperature,
+        # Spec 008 : état de la régulation automatique (statut, raison,
+        # fin de suspension manuelle) ; `None` sans radiateur.
+        "regulation": regulation,
     }
 
 
@@ -101,12 +106,22 @@ async def _async_assemble_areas(
         room_schedule = all_schedules["rooms"].get(area_id, schedule_module.empty_room_schedule())
         return schedule_module.current_target(room_schedule, settings, now)
 
+    regulator = regulator_module.get_regulator(hass)
+
+    def _regulation(area_id: str) -> dict[str, Any] | None:
+        if area_id not in room_ids_with_radiator:
+            return None
+        if regulator is None:
+            return dict(regulator_module.DEFAULT_STATUS)
+        return regulator.room_status(area_id)
+
     return [
         _assemble_room(
             hass,
             area,
             has_radiator=area.id in room_ids_with_radiator,
             target_temperature=_target_temperature(area.id),
+            regulation=_regulation(area.id),
         )
         for area in areas
     ]

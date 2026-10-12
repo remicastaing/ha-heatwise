@@ -13,10 +13,11 @@ import logging
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
 
-from .const import DOMAIN
+from .const import DOMAIN, SIGNAL_RADIATORS_CHANGED
 from .rfplayer_client import RFPlayerClient, RFPlayerUnreachable
 
 _LOGGER = logging.getLogger(__name__)
@@ -153,6 +154,7 @@ async def async_save_radiator(
     }
     data["radiators"].append(entry)
     await _store(hass).async_save(data)
+    async_dispatcher_send(hass, SIGNAL_RADIATORS_CHANGED)
     return _assemble(entry)
 
 
@@ -241,6 +243,36 @@ async def async_set_heating(
         hass.data.setdefault(_TIMERS_KEY, {})[radiator_id] = unsub
 
     return await async_get_radiator(hass, radiator_id)
+
+
+async def async_apply_regulation(
+    hass: HomeAssistant,
+    client: RFPlayerClient | None,
+    radiator_id: str,
+    *,
+    heating: bool,
+) -> None:
+    """Envoie un ordre de la régulation automatique (spec 008, FR-012,
+    FR-013).
+
+    Contrairement à `async_set_heating` (ordre manuel), aucune minuterie
+    d'arrêt automatique n'est armée (FR-016). L'état `heating` n'est
+    écrit qu'après envoi réussi (FR-009) ; `RFPlayerUnreachable` est
+    propagée à l'appelant, qui la signale et retente plus tard.
+    """
+    if client is None:
+        raise RFPlayerNotConfiguredError()
+    transmitter_id = int(radiator_id)
+    await client.async_set_heating(transmitter_id, heating=heating)
+    await _async_set_heating_state(hass, transmitter_id, heating)
+
+
+async def async_cancel_room_auto_off(hass: HomeAssistant, room_id: str) -> None:
+    """Annule les minuteries de chauffe manuelle des radiateurs d'une
+    pièce — quand la régulation reprend la main après une suspension
+    manuelle (spec 008, research R6)."""
+    for radiator in await async_list_radiators(hass, room_id):
+        _cancel_auto_off(hass, radiator["radiator_id"])
 
 
 async def async_force_stop_all(hass: HomeAssistant, client: RFPlayerClient | None) -> None:
@@ -346,5 +378,6 @@ async def async_delete_radiator(
     if not dissoc_sent and transmitter_id not in data["reserved_transmitter_ids"]:
         data["reserved_transmitter_ids"].append(transmitter_id)
     await _store(hass).async_save(data)
+    async_dispatcher_send(hass, SIGNAL_RADIATORS_CHANGED)
 
     return {"deleted": True, "radio_sent": radio_sent}

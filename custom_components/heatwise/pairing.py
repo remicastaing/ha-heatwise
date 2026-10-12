@@ -17,6 +17,7 @@ from datetime import datetime
 import logging
 from typing import Any, Callable
 
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import Context, Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
@@ -31,6 +32,7 @@ from .const import (
     PAIRING_CONFIG_TIMEOUT,
     PAIRING_DURATION,
     PAIRING_ENTITIES_TIMEOUT,
+    PAIRING_RELOAD_ENTITIES_TIMEOUT,
     PAIRING_SETTLE_DELAY,
     ZHA_DOMAIN,
     ZHA_GW_MSG_SIGNAL,
@@ -46,8 +48,9 @@ _LOGGER = logging.getLogger(__name__)
 _CONFIGURING = "configuring"
 _WAITING_ENTITIES = "waiting_entities"
 _SETTLING = "settling"
+_REPAIRING = "repairing"
 _NOT_A_SENSOR = "not_a_sensor"
-_PENDING = (_CONFIGURING, _WAITING_ENTITIES, _SETTLING)
+_PENDING = (_CONFIGURING, _WAITING_ENTITIES, _REPAIRING, _SETTLING)
 
 
 class PairingUnavailableError(Exception):
@@ -149,6 +152,8 @@ class SensorPairingSession:
         self._opened = False
         self._closed = False
         self._associating = False
+        # Un seul rechargement de ZHA par session (research R4ter).
+        self._zha_reloaded = False
         self.done = False
 
     # --- Cycle de vie ---
@@ -269,11 +274,58 @@ class SensorPairingSession:
     def _entities_timeout_job(self, device: JoinedDevice) -> Callable[[datetime], None]:
         @callback
         def _fire(_now: datetime) -> None:
-            if device.status == _WAITING_ENTITIES:
-                device.status = _NOT_A_SENSOR
-                self._on_not_a_sensor(device)
+            if device.status != _WAITING_ENTITIES:
+                return
+            if device.temperature_cluster and not self._zha_reloaded:
+                # Sonde appairée mais sans capteurs : ZHA a sauté leur
+                # création ; un rechargement de ZHA les crée (R4ter).
+                device.status = _REPAIRING
+                self.hass.async_create_task(self._async_repair(device))
+                return
+            device.status = _NOT_A_SENSOR
+            self._on_not_a_sensor(device)
 
         return _fire
+
+    async def _async_repair(self, device: JoinedDevice) -> None:
+        """Recharge ZHA pour qu'il crée les capteurs manquants de `device`,
+        puis attend qu'ils apparaissent (research R4ter)."""
+        self._zha_reloaded = True
+        entry = next(
+            (
+                entry
+                for entry in self.hass.config_entries.async_entries(ZHA_DOMAIN)
+                if entry.state is ConfigEntryState.LOADED
+            ),
+            None,
+        )
+        device_id, _, _ = self._device_sensors(device.ieee)
+        reloaded = False
+        if entry is not None:
+            self._emit(
+                {
+                    "type": "repairing",
+                    "ieee": device.ieee,
+                    "device_name": self._display_name(device, device_id),
+                }
+            )
+            try:
+                reloaded = await self.hass.config_entries.async_reload(entry.entry_id)
+            except HomeAssistantError as err:
+                _LOGGER.warning("Rechargement de ZHA impossible : %s", err)
+        if self.done or device.status != _REPAIRING:
+            return
+        if not reloaded:
+            device.status = _NOT_A_SENSOR
+            self._on_not_a_sensor(device)
+            return
+        device.status = _WAITING_ENTITIES
+        self._unsubs.append(
+            async_call_later(
+                self.hass, PAIRING_RELOAD_ENTITIES_TIMEOUT, self._entities_timeout_job(device)
+            )
+        )
+        self._check_device(device)
 
     # --- Capteurs de l'appareil (R4) ---
 

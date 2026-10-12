@@ -19,6 +19,7 @@ from . import schedule as schedule_module
 from . import schedules_store
 from . import sensors as sensors_module
 from .const import DOMAIN
+from .regulator import get_regulator
 from .rfplayer_client import RFPlayerClient, RFPlayerUnreachable
 from .rooms import InvalidRoomNameError
 
@@ -219,10 +220,18 @@ async def handle_delete_radiator(hass, connection, msg):
 @websocket_api.async_response
 async def handle_set_radiator_heating(hass, connection, msg):
     client = _client(hass)
+    regulator = get_regulator(hass)
     try:
-        radiator = await radiators_module.async_set_heating(
-            hass, client, msg["radiator_id"], heating=msg["heating"]
-        )
+        if regulator is not None:
+            # Spec 008 (FR-015) : l'ordre manuel suspend la régulation de
+            # la pièce 1 h, sous le verrou du Regulator (analyse I1).
+            radiator = await regulator.async_manual_heating(
+                msg["radiator_id"], heating=msg["heating"]
+            )
+        else:
+            radiator = await radiators_module.async_set_heating(
+                hass, client, msg["radiator_id"], heating=msg["heating"]
+            )
     except radiators_module.RadiatorNotFoundError:
         connection.send_error(msg["id"], "radiator_not_found", "Radiateur introuvable.")
         return

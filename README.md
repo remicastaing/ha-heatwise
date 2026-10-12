@@ -20,9 +20,10 @@ brique visuelle : un panneau personnalisé affichant les pièces, avec
 création de pièce depuis le panneau.
 
 L'itération `specs/003-heatwise-ajout-radiateur/` a ajouté l'appairage
-d'un radiateur au dongle RFPlayer et son pilotage manuel marche/arrêt. La
-programmation et la régulation automatique (consigne de température) ne
-sont pas encore implémentées.
+d'un radiateur au dongle RFPlayer et son pilotage manuel marche/arrêt.
+Les itérations suivantes ont ajouté la programmation (spec 005), les
+sondes (specs 006 et 007) puis la régulation automatique de chaque pièce
+(`specs/008-heatwise-regulation-auto/`).
 
 Le protocole radio est documenté en détail dans `docs/rfplayer-x2d.md` du
 dépôt privé (essais réels sur du matériel Delta Dore / RFPlayer).
@@ -85,7 +86,12 @@ dongle ci-dessus) :
    automatiquement à la pièce (température et, s'il existe, humidité) ;
    elle garde le nom donné par Home Assistant. « Arrêter » ou fermer la
    fenêtre referme le réseau. Un appareil qui ne mesure pas la
-   température reste dans Home Assistant sans être associé. Le bouton
+   température reste dans Home Assistant sans être associé. Si ZHA
+   termine la configuration d'une sonde sans créer ses capteurs (cas
+   fréquent avec les sondes sur pile qui se réannoncent pendant leur
+   configuration), Heatwise recharge l'intégration ZHA une fois — les
+   appareils Zigbee sont indisponibles quelques secondes — puis associe
+   la sonde. Le bouton
    n'apparaît que si l'intégration ZHA est chargée. Limite connue : la
    détection s'appuie sur un message interne de ZHA, à revérifier après
    une mise à jour majeure de Home Assistant.
@@ -102,7 +108,17 @@ dongle ci-dessus) :
    radiateurs, chacun avec une icône indiquant s'il chauffe. Cliquer sur
    l'icône allume ou éteint manuellement ce radiateur ; une chauffe
    manuelle s'arrête automatiquement après 1 h.
-5. Un bouton dans la barre d'outils permet de basculer l'affichage entre
+5. **Régulation automatique** : toute pièce qui a au moins un radiateur
+   et une sonde est régulée, sans réglage à activer. Ses radiateurs
+   chauffent quand la température mesurée passe sous « consigne −
+   0,3 °C » et s'arrêtent dès que la consigne est atteinte (consigne
+   courante de la programmation). Le pavé indique l'état : « Chauffe »,
+   « Consigne atteinte », « Régulée », « Arrêt de sécurité » (avec la
+   raison), « Régulation suspendue (manuel) jusqu'à HH:MM » ou « Non
+   régulée ». Une action manuelle sur un radiateur suspend la régulation
+   de toute la pièce pendant 1 h. Une pièce sans sonde n'est jamais
+   chauffée par la régulation.
+6. Un bouton dans la barre d'outils permet de basculer l'affichage entre
    pavés et liste ; le choix est mémorisé par navigateur.
 
 ## Entités exposées
@@ -119,7 +135,16 @@ une itération future a besoin d'automatisations ou de cartes Lovelace).
   limitée à 1 h par Heatwise (arrêt explicite envoyé, sans compter
   uniquement sur cette sécurité matérielle).
 - Au démarrage de Home Assistant, tous les radiateurs déjà enregistrés
-  reçoivent un ordre d'arrêt, quel que soit leur état avant l'arrêt.
+  reçoivent un ordre d'arrêt, quel que soit leur état avant l'arrêt ; la
+  régulation reprend ensuite pièce par pièce, sur des mesures valides.
+  Au déchargement de l'intégration, la régulation s'arrête et les
+  radiateurs reçoivent un ordre d'arrêt.
+- Régulation : arrêt de sécurité dès que la sonde est indisponible,
+  inconnue, non numérique ou muette depuis plus d'une heure ; l'ordre
+  courant (marche comme arrêt) est renvoyé au moins toutes les 15 min,
+  bien avant la coupure matérielle d'1 h, ce qui rattrape aussi les
+  trames perdues. Limite acceptée : une sonde défaillante qui envoie
+  régulièrement une valeur trop basse ferait chauffer la pièce.
 - Si le dongle RFPlayer est injoignable, aucun radiateur n'est ajouté et
   aucun ordre de chauffe/arrêt n'est considéré comme appliqué : un
   message d'erreur clair est affiché dans le panneau.
