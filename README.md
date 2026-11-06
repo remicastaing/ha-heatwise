@@ -23,7 +23,9 @@ L'itération `specs/003-heatwise-ajout-radiateur/` a ajouté l'appairage
 d'un radiateur au dongle RFPlayer et son pilotage manuel marche/arrêt.
 Les itérations suivantes ont ajouté la programmation (spec 005), les
 sondes (specs 006 et 007) puis la régulation automatique de chaque pièce
-(`specs/008-heatwise-regulation-auto/`).
+(`specs/008-heatwise-regulation-auto/`), puis le renommage et la
+suppression d'une pièce depuis le panneau
+(`specs/009-heatwise-renommer-supprimer-piece/`).
 
 Le protocole radio est documenté en détail dans `docs/rfplayer-x2d.md` du
 dépôt privé (essais réels sur du matériel Delta Dore / RFPlayer).
@@ -120,6 +122,28 @@ dongle ci-dessus) :
    chauffée par la régulation.
 6. Un bouton dans la barre d'outils permet de basculer l'affichage entre
    pavés et liste ; le choix est mémorisé par navigateur.
+7. **Renommer une pièce** : section « Pièce » des paramètres de la pièce
+   → modifier le nom → « Renommer ». La Zone Home Assistant est renommée
+   (Paramètres → Zones affiche le même nom) ; radiateurs, programmation
+   et sonde ne changent pas, aucun appareil n'est renommé. Un nom vide
+   ou déjà porté par une autre pièce (casse et espaces ignorés) est
+   refusé.
+8. **Supprimer une pièce** : bouton « Supprimer la pièce » en bas de ses
+   paramètres. Tant que la pièce a des radiateurs, la suppression est
+   refusée : supprimez-les d'abord (icône corbeille, qui éteint puis
+   dissocie chaque récepteur). Sinon, une confirmation récapitule ce qui
+   disparaît : la Zone et la programmation de la pièce sont supprimées ;
+   la sonde reste dans Home Assistant, sans zone. Aucun ordre radio
+   n'est envoyé.
+
+   **Pièce supprimée dans Paramètres → Zones** : Heatwise éteint ses
+   radiateurs (nouvel essai chaque minute si le dongle est injoignable),
+   efface sa programmation et la retire de la régulation. Les radiateurs
+   ne sont pas dissociés automatiquement : ils apparaissent dans
+   l'encart « Radiateurs sans pièce » de la vue principale, d'où on les
+   supprime (arrêt puis dissociation). Un radiateur sans pièce ne
+   chauffe jamais. Une pièce recréée ensuite sous le même nom part
+   vierge.
 
 ## Entités exposées
 

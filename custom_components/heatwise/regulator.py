@@ -164,6 +164,7 @@ class Regulator:
             self._sensor_unsub = None
         area_registry = ar.async_get(self.hass)
         room_ids = {r["room_id"] for r in await radiators_module.async_list_radiators(self.hass)}
+        room_ids.discard(None)  # radiateurs sans pièce (spec 009)
         self._entity_rooms = {}
         for room_id in room_ids:
             area = area_registry.async_get_area(room_id)
@@ -249,22 +250,32 @@ class Regulator:
         all_radiators = await radiators_module.async_list_radiators(hass)
         all_schedules = await schedules_store.async_get_all(hass)
 
+        removed = await self._async_reconcile_locked(
+            area_registry, all_radiators, all_schedules
+        )
+        if removed:
+            all_radiators = await radiators_module.async_list_radiators(hass)
+
         by_room: dict[str, list[dict[str, Any]]] = {}
+        roomless: list[dict[str, Any]] = []
         for radiator in all_radiators:
-            by_room.setdefault(radiator["room_id"], []).append(radiator)
+            if radiator["room_id"] is None:
+                roomless.append(radiator)
+            else:
+                by_room.setdefault(radiator["room_id"], []).append(radiator)
+        await self._async_stop_roomless(roomless)
 
         # Pièces sans radiateur : plus rien à réguler.
         for room_id in list(self._rooms):
             if room_id not in by_room:
                 del self._rooms[room_id]
 
-        changed: list[str] = []
+        changed: list[str] = list(removed)
         for room_id, room_radiators in by_room.items():
             if only is not None and room_id not in only:
                 continue
             area = area_registry.async_get_area(room_id)
-            if area is None:
-                await self._async_stop_orphans(room_radiators)
+            if area is None:  # zone supprimée depuis la réconciliation
                 continue
             if await self._async_evaluate_room(
                 room_id, area, room_radiators, all_schedules, now
@@ -272,21 +283,60 @@ class Regulator:
                 changed.append(room_id)
         return changed
 
-    async def _async_stop_orphans(self, room_radiators: list[dict[str, Any]]) -> None:
-        """Radiateurs d'une pièce supprimée encore en chauffe : arrêt
-        (principe I, analyse U1)."""
-        for radiator in room_radiators:
-            if radiator["heating"] and self.client is not None:
-                try:
-                    await radiators_module.async_apply_regulation(
-                        self.hass, self.client, radiator["radiator_id"], heating=False
-                    )
-                except RFPlayerUnreachable:
-                    _LOGGER.warning(
-                        "Dongle injoignable : impossible d'arrêter le radiateur "
-                        "orphelin %s",
-                        radiator["radiator_id"],
-                    )
+    async def _async_reconcile_locked(
+        self,
+        area_registry: ar.AreaRegistry,
+        all_radiators: list[dict[str, Any]],
+        all_schedules: dict[str, Any],
+    ) -> list[str]:
+        """Oublie les pièces dont la zone n'existe plus (spec 009, research
+        R3) : leurs radiateurs deviennent « sans pièce », leur
+        programmation et leur état de régulation sont retirés.
+
+        Le statut est écrit, pas déduit de l'absence de la zone : Home
+        Assistant redonne le même identifiant à une zone recréée sous le
+        même nom, qui doit partir vierge (research R2). Exécutée à chaque
+        évaluation, donc aussi au démarrage pour les zones supprimées
+        pendant l'arrêt (FR-014). `all_schedules` est mis à jour en place.
+        """
+        existing = {area.id for area in area_registry.async_list_areas()}
+        known = {r["room_id"] for r in all_radiators if r["room_id"] is not None}
+        known |= set(all_schedules["rooms"])
+        known |= set(self._rooms)
+        missing = sorted(known - existing)
+        if not missing:
+            return []
+        await radiators_module.async_detach_radiators(self.hass, missing)
+        await schedules_store.async_remove_rooms(self.hass, missing)
+        for room_id in missing:
+            all_schedules["rooms"].pop(room_id, None)
+            self._rooms.pop(room_id, None)
+        return missing
+
+    async def _async_stop_roomless(self, roomless: list[dict[str, Any]]) -> None:
+        """Radiateurs sans pièce encore en chauffe : arrêt (principe I,
+        spec 009 FR-012, FR-015). En cas d'échec, l'état reste « en
+        chauffe » et l'arrêt est retenté à l'évaluation suivante (tick de
+        60 s) ; la minuterie de chauffe manuelle éventuelle n'est annulée
+        qu'après un arrêt transmis."""
+        if self.client is None:
+            return
+        for radiator in roomless:
+            if not radiator["heating"]:
+                continue
+            radiator_id = radiator["radiator_id"]
+            try:
+                await radiators_module.async_apply_regulation(
+                    self.hass, self.client, radiator_id, heating=False
+                )
+            except RFPlayerUnreachable:
+                _LOGGER.warning(
+                    "Dongle injoignable : impossible d'arrêter le radiateur "
+                    "sans pièce %s ; nouvel essai à la prochaine évaluation",
+                    radiator_id,
+                )
+            else:
+                radiators_module.cancel_auto_off(self.hass, radiator_id)
 
     async def _async_evaluate_room(
         self,

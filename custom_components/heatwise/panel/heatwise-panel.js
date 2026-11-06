@@ -135,6 +135,9 @@ class HeatwisePanel extends LitElement {
     _pairing: { state: true },
     _settingsDialog: { state: true },
     _radiatorDeletion: { state: true },
+    _renameDraft: { state: true },
+    _roomDeletion: { state: true },
+    _orphanRadiators: { state: true },
     _scheduleRoom: { state: true },
     _generalSettingsDialog: { state: true },
     _generalSettings: { state: true },
@@ -759,6 +762,61 @@ class HeatwisePanel extends LitElement {
       color: #9a4b0a;
     }
 
+    .button-danger {
+      padding: 9px 16px;
+      background: transparent;
+      border: 1px solid rgba(179, 38, 30, 0.4);
+      border-radius: 9px;
+      color: var(--error-color, #b3261e);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .button-danger.filled {
+      background: var(--error-color, #b3261e);
+      border-color: transparent;
+      color: #ffffff;
+    }
+
+    .button-danger:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+
+    .rename-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .rename-row input {
+      flex: 1;
+    }
+
+    .deletion-summary {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    .room-deletion-footer {
+      display: flex;
+      justify-content: flex-start;
+      border-top: 1px solid var(--hw-border);
+      padding-top: 16px;
+    }
+
+    .orphan-section {
+      margin-top: 24px;
+      background: var(--hw-card);
+      border: 1px solid var(--hw-border);
+      border-radius: 16px;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
     .vacation-banner {
       display: flex;
       align-items: center;
@@ -779,7 +837,12 @@ class HeatwisePanel extends LitElement {
     this._loaded = false;
     this._createDialogOpen = false;
     this._createName = "";
-    this._createError = false;
+    this._createError = null;
+    // Spec 009 : renommage (brouillon du champ Nom de la fenêtre de
+    // paramètres), suppression de pièce, radiateurs sans pièce.
+    this._renameDraft = null;
+    this._roomDeletion = null;
+    this._orphanRadiators = [];
     this._sensorDialog = null;
     this._sensorDissociation = null;
     // Appairage d'une sonde Zigbee (spec 007) : étape affichée dans la
@@ -962,6 +1025,15 @@ class HeatwisePanel extends LitElement {
       type: "heatwise/list_rooms",
     });
     this._rooms = response.rooms;
+    this._orphanRadiators = response.orphan_radiators || [];
+    // Spec 009 : pièce supprimée ailleurs (Paramètres → Zones, autre
+    // fenêtre) pendant que ses fenêtres sont ouvertes → on les ferme.
+    if (this._settingsDialog && !this._roomById(this._settingsDialog.room.room_id)) {
+      this._closeSettingsDialog();
+    }
+    if (this._roomDeletion && !this._roomById(this._roomDeletion.room.room_id)) {
+      this._roomDeletion = null;
+    }
   }
 
   // --- Ajout d'un radiateur (US1) ---
@@ -1109,11 +1181,91 @@ class HeatwisePanel extends LitElement {
 
   async _openSettingsDialog(room) {
     this._settingsDialog = { room, radiators: [], loading: true, error: null };
+    this._renameDraft = { roomId: room.room_id, value: room.name, dirty: false, busy: false, error: null };
     await this._loadSettingsRadiators();
   }
 
   _closeSettingsDialog() {
     this._settingsDialog = null;
+    this._renameDraft = null;
+    this._roomDeletion = null;
+  }
+
+  // --- Renommer une pièce (spec 009, US1) ---
+
+  _onRenameInput(event) {
+    this._renameDraft = { ...this._renameDraft, value: event.target.value, dirty: true, error: null };
+  }
+
+  async _submitRename(room) {
+    const draft = this._renameDraft;
+    const name = draft.value.trim();
+    if (draft.busy) {
+      return;
+    }
+    if (!name) {
+      this._renameDraft = { ...draft, error: "Le nom est obligatoire." };
+      return;
+    }
+    this._renameDraft = { ...draft, busy: true, error: null };
+    try {
+      await this.hass.connection.sendMessagePromise({
+        type: "heatwise/rename_room",
+        room_id: room.room_id,
+        name,
+      });
+      this._renameDraft = { ...this._renameDraft, value: name, dirty: false, busy: false };
+      await this._loadRooms();
+    } catch (err) {
+      this._renameDraft = {
+        ...this._renameDraft,
+        busy: false,
+        error: err.message || "Une erreur est survenue.",
+      };
+      if (err.code === "room_not_found") {
+        await this._loadRooms();
+      }
+    }
+  }
+
+  // --- Supprimer une pièce (spec 009, US2) ---
+
+  _askRoomDeletion(room) {
+    this._roomDeletion = { room, busy: false, error: null };
+  }
+
+  _cancelRoomDeletion() {
+    this._roomDeletion = null;
+  }
+
+  async _confirmRoomDeletion() {
+    const deletion = this._roomDeletion;
+    if (deletion.busy) {
+      return;
+    }
+    this._roomDeletion = { ...deletion, busy: true, error: null };
+    try {
+      await this.hass.connection.sendMessagePromise({
+        type: "heatwise/delete_room",
+        room_id: deletion.room.room_id,
+      });
+      this._closeSettingsDialog();
+      await this._loadRooms();
+    } catch (err) {
+      if (err.code === "room_not_found") {
+        this._closeSettingsDialog();
+        await this._loadRooms();
+        return;
+      }
+      this._roomDeletion = {
+        ...this._roomDeletion,
+        busy: false,
+        error: err.message || "Une erreur est survenue.",
+      };
+      if (err.code === "room_has_radiators" && this._settingsDialog) {
+        await this._loadSettingsRadiators();
+      }
+    }
   }
 
   async _loadSettingsRadiators() {
@@ -1184,13 +1336,17 @@ class HeatwisePanel extends LitElement {
       });
       this._radiatorDeletion = null;
       await this._loadRooms();
-      await this._loadSettingsRadiators();
+      await this._reloadSettingsRadiators();
       if (response.radio_sent === false) {
-        this._settingsDialog = {
-          ...this._settingsDialog,
-          error:
-            "Le récepteur reste associé au dongle : dissociez-le manuellement sur le récepteur.",
-        };
+        const notice =
+          "Le récepteur reste associé au dongle : dissociez-le manuellement sur le récepteur.";
+        if (this._settingsDialog) {
+          this._settingsDialog = { ...this._settingsDialog, error: notice };
+        } else {
+          // Radiateur sans pièce (spec 009) : pas de fenêtre de pièce
+          // ouverte, l'avertissement reste dans la fenêtre de suppression.
+          this._radiatorDeletion = { radiator, step: "notice", busy: false, error: notice };
+        }
       }
       return;
     } catch (err) {
@@ -1201,13 +1357,13 @@ class HeatwisePanel extends LitElement {
           busy: false,
           error: this._pairingErrorMessage(err),
         };
-        await this._loadSettingsRadiators();
+        await this._reloadSettingsRadiators();
         return;
       }
       if (err.code === "radiator_not_found") {
         this._radiatorDeletion = null;
         await this._loadRooms();
-        await this._loadSettingsRadiators();
+        await this._reloadSettingsRadiators();
         return;
       }
       this._radiatorDeletion = {
@@ -1218,10 +1374,18 @@ class HeatwisePanel extends LitElement {
     }
   }
 
+  // La fenêtre de la pièce n'est pas ouverte quand on supprime un
+  // radiateur sans pièce depuis l'encart de la vue principale (spec 009).
+  async _reloadSettingsRadiators() {
+    if (this._settingsDialog) {
+      await this._loadSettingsRadiators();
+    }
+  }
+
   _openCreateDialog() {
     this._createDialogOpen = true;
     this._createName = "";
-    this._createError = false;
+    this._createError = null;
   }
 
   _closeCreateDialog() {
@@ -1230,13 +1394,13 @@ class HeatwisePanel extends LitElement {
 
   _onCreateNameInput(event) {
     this._createName = event.target.value;
-    this._createError = false;
+    this._createError = null;
   }
 
   async _submitCreateRoom() {
     const name = this._createName.trim();
     if (!name) {
-      this._createError = true;
+      this._createError = "Le nom est obligatoire.";
       return;
     }
 
@@ -1248,8 +1412,8 @@ class HeatwisePanel extends LitElement {
       this._rooms = [...this._rooms, response.room];
       this._createDialogOpen = false;
     } catch (err) {
-      if (err.code === "invalid_name") {
-        this._createError = true;
+      if (err.code === "invalid_name" || err.code === "name_taken") {
+        this._createError = err.message;
       } else {
         throw err;
       }
@@ -1637,10 +1801,12 @@ class HeatwisePanel extends LitElement {
           : ""}
 
         ${this._rooms.length ? this._renderRooms() : html`<p class="hint">Aucune pièce pour l'instant.</p>`}
+        ${this._orphanRadiators.length ? this._renderOrphanRadiators() : ""}
       </div>
 
       ${this._createDialogOpen ? this._renderCreateDialog() : ""}
       ${this._settingsDialog ? this._renderSettingsDialog() : ""}
+      ${this._roomDeletion ? this._renderRoomDeletionDialog() : ""}
       ${this._sensorDialog ? this._renderSensorDialog() : ""}
       ${this._sensorDissociation ? this._renderSensorDissociationDialog() : ""}
       ${this._radiatorDeletion ? this._renderRadiatorDeletionDialog() : ""}
@@ -1722,6 +1888,8 @@ class HeatwisePanel extends LitElement {
             </button>
           </div>
 
+          ${this._renderRenameSection(room)}
+
           ${this._renderSensorSection(room)}
 
           <div class="section-header">
@@ -1744,6 +1912,158 @@ class HeatwisePanel extends LitElement {
                   ${radiators.map((radiator) => this._renderRadiatorRow(radiator))}
                 </div>`
               : html`<p class="hint">Aucun radiateur pour cette pièce.</p>`}
+
+          <div class="room-deletion-footer">
+            <button
+              class="button-danger"
+              ?disabled=${loading}
+              @click=${() => this._askRoomDeletion(room)}
+            >
+              Supprimer la pièce
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Section « Pièce » des paramètres : renommage (spec 009, US1). Tant
+  // que le champ n'a pas été modifié, il suit le nom courant (renommage
+  // fait ailleurs pendant que la fenêtre est ouverte).
+  _renderRenameSection(room) {
+    const draft = this._renameDraft || { value: room.name, dirty: false, busy: false, error: null };
+    const value = draft.dirty ? draft.value : room.name;
+    const unchanged = value.trim() === room.name;
+    return html`
+      <div class="section-header">
+        <h3 class="section-title">Pièce</h3>
+      </div>
+      <div>
+        <label for="hw-room-rename">Nom</label>
+        <div class="rename-row">
+          <input
+            id="hw-room-rename"
+            type="text"
+            .value=${value}
+            @input=${this._onRenameInput}
+            @keydown=${(event) => {
+              if (event.key === "Enter" && value.trim() && !unchanged) {
+                this._submitRename(room);
+              }
+            }}
+          />
+          <button
+            class="button-secondary"
+            ?disabled=${draft.busy || !value.trim() || unchanged}
+            @click=${() => this._submitRename(room)}
+          >
+            Renommer
+          </button>
+        </div>
+        ${draft.error ? html`<p class="dialog-error">${draft.error}</p>` : ""}
+      </div>
+    `;
+  }
+
+  // Confirmation de suppression d'une pièce (spec 009, US2) : refusée
+  // tant qu'il reste des radiateurs (FR-008) ; aucun ordre radio.
+  _renderRoomDeletionDialog() {
+    const { busy, error } = this._roomDeletion;
+    const room = this._roomById(this._roomDeletion.room.room_id) || this._roomDeletion.room;
+    const radiators = (this._settingsDialog && this._settingsDialog.radiators) || [];
+    const sensorState = room.has_sensor && this.hass.states[room.temperature_entity_id];
+    const sensorName =
+      (sensorState && sensorState.attributes.friendly_name) || room.temperature_entity_id;
+    return html`
+      <div class="dialog-overlay">
+        <div class="dialog">
+          <div class="dialog-header">
+            <div>
+              <h2>Supprimer la pièce</h2>
+              <span class="dialog-subtitle">— ${room.name}</span>
+            </div>
+            <button
+              class="icon-button"
+              aria-label="Fermer"
+              @click=${this._cancelRoomDeletion}
+            >
+              <ha-icon icon="mdi:close"></ha-icon>
+            </button>
+          </div>
+          ${radiators.length
+            ? html`<p class="hint">
+                  Cette pièce a encore des radiateurs. Supprimez-les d'abord
+                  depuis ses paramètres :
+                  ${radiators.map((r) => r.name).join(", ")}.
+                </p>
+                ${error ? html`<p class="dialog-error">${error}</p>` : ""}
+                <div class="dialog-actions">
+                  <button class="button-secondary" @click=${this._cancelRoomDeletion}>
+                    Fermer
+                  </button>
+                </div>`
+            : html`<p class="hint">
+                  « ${room.name} » sera supprimée du panneau et de
+                  Home Assistant (Paramètres → Zones).
+                </p>
+                <ul class="hint deletion-summary">
+                  <li>Sa programmation sera effacée.</li>
+                  ${room.has_sensor
+                    ? html`<li>
+                        La sonde « ${sensorName} » reste dans Home Assistant,
+                        sans zone.
+                      </li>`
+                    : ""}
+                </ul>
+                ${error ? html`<p class="dialog-error">${error}</p>` : ""}
+                <div class="dialog-actions">
+                  <button
+                    class="button-secondary"
+                    ?disabled=${busy}
+                    @click=${this._cancelRoomDeletion}
+                  >
+                    Annuler
+                  </button>
+                  <button
+                    class="button-danger filled"
+                    ?disabled=${busy}
+                    @click=${this._confirmRoomDeletion}
+                  >
+                    Supprimer
+                  </button>
+                </div>`}
+        </div>
+      </div>
+    `;
+  }
+
+  // Encart « Radiateurs sans pièce » (spec 009, US3) : radiateurs dont
+  // la zone a été supprimée hors du panneau, arrêtés par la régulation ;
+  // seule action : la suppression (arrêt puis dissociation, spec 004).
+  _renderOrphanRadiators() {
+    return html`
+      <div class="orphan-section">
+        <h3 class="section-title">Radiateurs sans pièce</h3>
+        <p class="hint">
+          Leur pièce a été supprimée. Ils sont à l'arrêt ; supprimez-les
+          pour les dissocier du dongle.
+        </p>
+        <div class="radiator-list">
+          ${this._orphanRadiators.map(
+            (radiator) => html`
+              <div class="radiator-row">
+                <button
+                  class="icon-button radiator-delete"
+                  aria-label="Supprimer ${radiator.name}"
+                  title="Supprimer ${radiator.name}"
+                  @click=${() => this._askRadiatorDeletion(radiator)}
+                >
+                  <ha-icon icon="mdi:trash-can-outline"></ha-icon>
+                </button>
+                <span class="radiator-name">${radiator.name}</span>
+              </div>
+            `
+          )}
         </div>
       </div>
     `;
@@ -2245,6 +2565,27 @@ class HeatwisePanel extends LitElement {
   _renderRadiatorDeletionDialog() {
     const { radiator, step, busy, error } = this._radiatorDeletion;
 
+    if (step === "notice") {
+      return html`
+        <div class="dialog-overlay">
+          <div class="dialog">
+            <div class="dialog-header">
+              <div>
+                <h2>Radiateur supprimé</h2>
+                <span class="dialog-subtitle">— ${radiator.name}</span>
+              </div>
+            </div>
+            <p class="hint">${error}</p>
+            <div class="dialog-actions">
+              <button class="button-primary" @click=${this._cancelRadiatorDeletion}>
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
     if (step === "unreachable") {
       return html`
         <div class="dialog-overlay">
@@ -2464,7 +2805,7 @@ class HeatwisePanel extends LitElement {
               @input=${this._onCreateNameInput}
             />
             ${this._createError
-              ? html`<p class="dialog-error">Le nom est obligatoire.</p>`
+              ? html`<p class="dialog-error">${this._createError}</p>`
               : ""}
           </div>
           <div class="dialog-actions">

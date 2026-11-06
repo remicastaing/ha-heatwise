@@ -28,6 +28,9 @@ def _client(hass: HomeAssistant) -> RFPlayerClient | None:
     return hass.data.get(DOMAIN, {}).get("client")
 
 
+_NAME_TAKEN = "Une pièce porte déjà ce nom."
+
+
 def _room_exists(hass: HomeAssistant, room_id: str) -> bool:
     return ar.async_get(hass).async_get_area(room_id) is not None
 
@@ -36,7 +39,13 @@ def _room_exists(hass: HomeAssistant, room_id: str) -> bool:
 @websocket_api.require_admin
 @websocket_api.async_response
 async def handle_list_rooms(hass, connection, msg):
-    connection.send_result(msg["id"], {"rooms": await rooms_module.list_rooms(hass)})
+    connection.send_result(
+        msg["id"],
+        {
+            "rooms": await rooms_module.list_rooms(hass),
+            "orphan_radiators": await rooms_module.async_list_orphan_radiators(hass),
+        },
+    )
 
 
 @websocket_api.websocket_command({"type": "heatwise/create_room", "name": str})
@@ -48,7 +57,53 @@ def handle_create_room(hass, connection, msg):
     except InvalidRoomNameError:
         connection.send_error(msg["id"], "invalid_name", "Le nom est obligatoire.")
         return
+    except rooms_module.RoomNameTakenError:
+        connection.send_error(msg["id"], "name_taken", _NAME_TAKEN)
+        return
     connection.send_result(msg["id"], {"room": room})
+
+
+# --- Renommer et supprimer une pièce (spec 009) ---
+
+
+@websocket_api.websocket_command(
+    {"type": "heatwise/rename_room", "room_id": str, "name": str}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def handle_rename_room(hass, connection, msg):
+    try:
+        room = await rooms_module.async_rename_room(hass, msg["room_id"], msg["name"])
+    except rooms_module.RoomNotFoundError:
+        connection.send_error(msg["id"], "room_not_found", "Pièce introuvable.")
+        return
+    except InvalidRoomNameError:
+        connection.send_error(msg["id"], "invalid_name", "Le nom est obligatoire.")
+        return
+    except rooms_module.RoomNameTakenError:
+        connection.send_error(msg["id"], "name_taken", _NAME_TAKEN)
+        return
+    connection.send_result(msg["id"], {"room": room})
+
+
+@websocket_api.websocket_command({"type": "heatwise/delete_room", "room_id": str})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def handle_delete_room(hass, connection, msg):
+    try:
+        await rooms_module.async_delete_room(hass, msg["room_id"])
+    except rooms_module.RoomNotFoundError:
+        connection.send_error(msg["id"], "room_not_found", "Pièce introuvable.")
+        return
+    except rooms_module.RoomHasRadiatorsError as err:
+        connection.send_error(
+            msg["id"],
+            "room_has_radiators",
+            "Supprimez d'abord les radiateurs de la pièce : "
+            f"{', '.join(err.names)}.",
+        )
+        return
+    connection.send_result(msg["id"], {"deleted": True})
 
 
 @websocket_api.websocket_command(
@@ -234,6 +289,13 @@ async def handle_set_radiator_heating(hass, connection, msg):
             )
     except radiators_module.RadiatorNotFoundError:
         connection.send_error(msg["id"], "radiator_not_found", "Radiateur introuvable.")
+        return
+    except radiators_module.RadiatorWithoutRoomError:
+        connection.send_error(
+            msg["id"],
+            "radiator_without_room",
+            "Ce radiateur n'est rattaché à aucune pièce.",
+        )
         return
     except radiators_module.RFPlayerNotConfiguredError:
         connection.send_error(
@@ -614,6 +676,8 @@ async def handle_pair_sensor(hass, connection, msg):
 def async_register_commands(hass: HomeAssistant) -> None:
     """Enregistre les commandes websocket du panneau Heatwise."""
     websocket_api.async_register_command(hass, handle_list_rooms)
+    websocket_api.async_register_command(hass, handle_rename_room)
+    websocket_api.async_register_command(hass, handle_delete_room)
     websocket_api.async_register_command(hass, handle_create_room)
     websocket_api.async_register_command(hass, handle_pair_radiator)
     websocket_api.async_register_command(hass, handle_confirm_radiator_pairing)

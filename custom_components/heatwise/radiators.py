@@ -6,6 +6,10 @@ module persiste la liste des radiateurs dans un `Store` Heatwise dédié
 (cf. `data-model.md` de la spec 003). Les ordres radio eux-mêmes passent
 par `rfplayer_client.py`, fourni par l'appelant (`websocket_api.py`,
 `__init__.py`) plutôt que relu ici depuis `hass.data`.
+
+Un radiateur dont la pièce a été supprimée hors du panneau est « sans
+pièce » (`room_id` à `None`, spec 009) : il reste enregistré, à l'arrêt,
+jusqu'à ce que l'utilisateur le supprime (dissociation confirmée).
 """
 from __future__ import annotations
 
@@ -54,6 +58,10 @@ class RFPlayerNotConfiguredError(Exception):
     """Aucun port RFPlayer configuré (FR-022)."""
 
 
+class RadiatorWithoutRoomError(Exception):
+    """Radiateur « sans pièce » : jamais mis en chauffe (spec 009, FR-012b)."""
+
+
 def _store(hass: HomeAssistant) -> Store:
     return Store(hass, STORAGE_VERSION, STORAGE_KEY)
 
@@ -91,6 +99,22 @@ async def async_list_radiators(
     if room_id is not None:
         radiators = [r for r in radiators if r["room_id"] == room_id]
     return [_assemble(r) for r in radiators]
+
+
+async def async_detach_radiators(hass: HomeAssistant, room_ids: list[str]) -> list[str]:
+    """Rend « sans pièce » les radiateurs des pièces données, disparues
+    (spec 009, research R2) : `room_id` passe à `None`, rien d'autre ne
+    change. Retourne les `radiator_id` détachés."""
+    data = await _async_load(hass)
+    detached: list[str] = []
+    for entry in data["radiators"]:
+        if entry["room_id"] is not None and entry["room_id"] in room_ids:
+            entry["room_id"] = None
+            detached.append(str(entry["transmitter_id"]))
+    if detached:
+        await _store(hass).async_save(data)
+        async_dispatcher_send(hass, SIGNAL_RADIATORS_CHANGED)
+    return detached
 
 
 async def async_get_radiator(hass: HomeAssistant, radiator_id: str) -> dict[str, Any]:
@@ -180,6 +204,13 @@ def _cancel_auto_off(hass: HomeAssistant, radiator_id: str) -> None:
 
 
 @callback
+def cancel_auto_off(hass: HomeAssistant, radiator_id: str) -> None:
+    """Annule la minuterie de chauffe manuelle d'un radiateur (spec 009 :
+    radiateur sans pièce arrêté par la régulation)."""
+    _cancel_auto_off(hass, radiator_id)
+
+
+@callback
 def async_cancel_all_auto_off_timers(hass: HomeAssistant) -> None:
     """Annule toutes les minuteries de chauffe manuelle en cours.
 
@@ -215,6 +246,8 @@ async def async_set_heating(
     )
     if entry is None:
         raise RadiatorNotFoundError(radiator_id)
+    if entry["room_id"] is None:
+        raise RadiatorWithoutRoomError(radiator_id)
     if client is None:
         raise RFPlayerNotConfiguredError()
 

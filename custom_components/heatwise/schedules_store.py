@@ -120,6 +120,23 @@ async def async_mutate_rooms(
     return {room_id: schedule_module.copy_room_schedule(result[room_id]) for room_id in room_ids}
 
 
+async def async_remove_rooms(hass: HomeAssistant, room_ids: list[str]) -> list[str]:
+    """Retire la programmation des pièces données (spec 009 : pièce
+    supprimée). Ne sauvegarde et n'émet `heatwise_schedule_updated` que
+    si au moins une entrée existait ; retourne les `room_id` retirés."""
+    async with _lock(hass):
+        data = await _async_load(hass)
+        removed = [room_id for room_id in room_ids if room_id in data["rooms"]]
+        if not removed:
+            return []
+        for room_id in removed:
+            del data["rooms"][room_id]
+        await _store(hass).async_save(data)
+
+    hass.bus.async_fire(EVENT_SCHEDULE_UPDATED, {"room_ids": removed})
+    return removed
+
+
 async def async_update_settings(hass: HomeAssistant, **changes: Any) -> dict[str, Any]:
     """Modifie un ou plusieurs paramètres généraux (FR-010 à FR-011,
     FR-022). Valide `default_temperature` si fourni (FR-008). Émet

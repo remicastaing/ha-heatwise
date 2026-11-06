@@ -23,10 +23,25 @@ from . import regulator as regulator_module
 from . import schedule as schedule_module
 from . import schedules_store
 from . import sensors as sensors_module
+from .sensors import RoomNotFoundError  # partagée avec l'association de sonde
 
 
 class InvalidRoomNameError(Exception):
-    """Levée quand le nom fourni pour créer une pièce est vide."""
+    """Levée quand le nom fourni pour créer ou renommer une pièce est vide."""
+
+
+class RoomHasRadiatorsError(Exception):
+    """Suppression refusée : la pièce a encore des radiateurs, à supprimer
+    d'abord (spec 009, FR-008)."""
+
+    def __init__(self, names: list[str]) -> None:
+        super().__init__(", ".join(names))
+        self.names = names
+
+
+class RoomNameTakenError(Exception):
+    """Nom déjà porté par une autre zone, selon la règle native de Home
+    Assistant (casse et espaces ignorés) — spec 009, research R1."""
 
 
 def _assemble_room(
@@ -95,6 +110,7 @@ async def _async_assemble_areas(
     `async_get_room`."""
     all_radiators = await radiators_module.async_list_radiators(hass)
     room_ids_with_radiator = {r["room_id"] for r in all_radiators}
+    room_ids_with_radiator.discard(None)  # radiateurs sans pièce (spec 009)
 
     all_schedules = await schedules_store.async_get_all(hass)
     settings = all_schedules["settings"]
@@ -140,6 +156,14 @@ async def list_rooms(hass: HomeAssistant) -> list[dict[str, Any]]:
     )
 
 
+async def async_list_orphan_radiators(hass: HomeAssistant) -> list[dict[str, Any]]:
+    """Radiateurs dont la pièce a disparu hors du panneau (spec 009,
+    FR-012a), affichés dans l'encart « Radiateurs sans pièce »."""
+    return [
+        r for r in await radiators_module.async_list_radiators(hass) if r["room_id"] is None
+    ]
+
+
 async def async_get_room(hass: HomeAssistant, room_id: str) -> dict[str, Any] | None:
     """Une seule pièce assemblée, ou `None` si l'Area n'existe pas."""
     area = ar.async_get(hass).async_get_area(room_id)
@@ -153,14 +177,61 @@ def create_room(hass: HomeAssistant, name: str) -> dict[str, Any]:
     """Crée une nouvelle pièce (Area HA) et retourne sa forme assemblée.
 
     Lève `InvalidRoomNameError` si `name` est vide après suppression des
-    espaces superflus (FR-011). Aucune contrainte d'unicité : Home
-    Assistant autorise déjà des noms d'Area identiques (cf. Edge Cases de
-    spec.md). Une pièce nouvellement créée n'a par définition aucun
+    espaces superflus (FR-011), `RoomNameTakenError` si une zone porte
+    déjà ce nom : Home Assistant refuse les doublons (casse et espaces
+    ignorés), contrairement à ce que supposait la spec 002 (spec 009,
+    research R1). Une pièce nouvellement créée n'a par définition aucun
     radiateur.
     """
     trimmed_name = name.strip()
     if not trimmed_name:
         raise InvalidRoomNameError("Le nom de la pièce est obligatoire.")
 
-    area = ar.async_get(hass).async_create(trimmed_name)
+    try:
+        area = ar.async_get(hass).async_create(trimmed_name)
+    except ValueError as err:
+        raise RoomNameTakenError(trimmed_name) from err
     return _assemble_room(hass, area, has_radiator=False)
+
+
+async def async_rename_room(hass: HomeAssistant, room_id: str, name: str) -> dict[str, Any]:
+    """Renomme la zone elle-même (spec 009, FR-001 à FR-005) : le panneau
+    et Paramètres → Zones affichent le même nom. Radiateurs,
+    programmation et sonde sont rattachés à l'identifiant, pas au nom,
+    et restent inchangés ; aucun appareil n'est renommé."""
+    trimmed_name = name.strip()
+    if not trimmed_name:
+        raise InvalidRoomNameError("Le nom de la pièce est obligatoire.")
+    area_registry = ar.async_get(hass)
+    if area_registry.async_get_area(room_id) is None:
+        raise RoomNotFoundError(room_id)
+    try:
+        area_registry.async_update(room_id, name=trimmed_name)
+    except ValueError as err:
+        raise RoomNameTakenError(trimmed_name) from err
+    room = await async_get_room(hass, room_id)
+    assert room is not None
+    return room
+
+
+async def async_delete_room(hass: HomeAssistant, room_id: str) -> None:
+    """Supprime une pièce depuis le panneau (spec 009, FR-006 à FR-011).
+
+    Refusée tant que la pièce a des radiateurs (FR-008) : aucun ordre
+    radio n'est donc jamais envoyé ici (FR-009). Sinon, la programmation
+    est retirée puis la zone supprimée ; Home Assistant détache lui-même
+    appareils et entités de la zone (la sonde reste, sans zone, FR-011)
+    et la réconciliation du `Regulator`, déclenchée par
+    `area_registry_updated`, oublie l'état de régulation (research R6).
+    """
+    area_registry = ar.async_get(hass)
+    if area_registry.async_get_area(room_id) is None:
+        raise RoomNotFoundError(room_id)
+    room_radiators = await radiators_module.async_list_radiators(hass, room_id)
+    if room_radiators:
+        raise RoomHasRadiatorsError([r["name"] for r in room_radiators])
+
+    await schedules_store.async_remove_rooms(hass, [room_id])
+    # La zone a pu disparaître pendant la mise à jour de la programmation.
+    if area_registry.async_get_area(room_id) is not None:
+        area_registry.async_delete(room_id)

@@ -1,7 +1,7 @@
 """Connexion série asynchrone au dongle RFPlayer.
 
 Ce module s'occupe uniquement de l'E/S (connexion série via
-`pyserial-asyncio`) ; l'encodage des commandes reste dans `x2d_protocol.py`
+`serialx`, qui remplace `pyserial-asyncio` dans Home Assistant) ; l'encodage des commandes reste dans `x2d_protocol.py`
 (pur, sans E/S, cf. `docs/rfplayer-x2d.md`). Le protocole X2D n'a aucun
 accusé de réception : une écriture réussie prouve seulement que l'ordre a
 été remis au dongle, pas que le radiateur l'a reçu — la confirmation reste
@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-import serial_asyncio
+import serialx
 
 from . import x2d_protocol
 
@@ -64,10 +64,10 @@ class RFPlayerClient:
         if self._writer is None or self._writer.is_closing():
             try:
                 async with asyncio.timeout(IO_TIMEOUT):
-                    self._reader, self._writer = await serial_asyncio.open_serial_connection(
+                    self._reader, self._writer = await serialx.open_serial_connection(
                         url=self._port, baudrate=BAUDRATE
                     )
-            except (OSError, asyncio.TimeoutError) as err:
+            except (OSError, serialx.SerialException, asyncio.TimeoutError) as err:
                 self._reader = None
                 self._writer = None
                 raise RFPlayerUnreachable(str(err)) from err
@@ -85,7 +85,7 @@ class RFPlayerClient:
             async with asyncio.timeout(IO_TIMEOUT):
                 writer.write(f"{command}\r".encode())
                 await writer.drain()
-        except (OSError, asyncio.TimeoutError) as err:
+        except (OSError, serialx.SerialException, asyncio.TimeoutError) as err:
             await self.async_close()
             raise RFPlayerUnreachable(str(err)) from err
 
