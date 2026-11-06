@@ -95,10 +95,11 @@ def get_regulator(hass: HomeAssistant) -> Regulator | None:
     return hass.data.get(DOMAIN, {}).get("regulator")
 
 
-def _sensor_reading(
+def sensor_reading(
     hass: HomeAssistant, entity_id: str | None, now: datetime
 ) -> tuple[SensorHealth, float | None]:
-    """Classe la sonde d'une pièce (data-model.md, `SensorHealth`)."""
+    """Classe la sonde d'une pièce (data-model.md, `SensorHealth`).
+    Partagée avec l'historique (spec 010, research R2)."""
     if entity_id is None:
         return SensorHealth.NONE, None
     state = hass.states.get(entity_id)
@@ -373,7 +374,7 @@ class Regulator:
         room_schedule = all_schedules["rooms"].get(
             room_id, schedule_module.empty_room_schedule()
         )
-        health, measured = _sensor_reading(self.hass, area.temperature_entity_id, now)
+        health, measured = sensor_reading(self.hass, area.temperature_entity_id, now)
         inputs = RoomInputs(
             now=now,
             room_id=room_id,

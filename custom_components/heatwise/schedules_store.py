@@ -16,7 +16,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from . import schedule as schedule_module
-from .const import DOMAIN, EVENT_SCHEDULE_UPDATED
+from .const import (
+    DOMAIN,
+    EVENT_SCHEDULE_UPDATED,
+    HISTORY_INTERVAL_DEFAULT,
+    HISTORY_INTERVAL_MAX,
+    HISTORY_INTERVAL_MIN,
+)
 
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.schedules"
@@ -32,14 +38,36 @@ def _default_settings() -> dict[str, Any]:
     return {
         "default_temperature": schedule_module.DEFAULT_TEMPERATURE,
         "vacation_mode": False,
+        "history_interval": HISTORY_INTERVAL_DEFAULT,
     }
+
+
+class InvalidHistoryIntervalError(ValueError):
+    """Fréquence d'historique hors bornes ou non entière (spec 010,
+    FR-011)."""
+
+
+def validate_history_interval(value: Any) -> None:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not HISTORY_INTERVAL_MIN <= value <= HISTORY_INTERVAL_MAX
+    ):
+        raise InvalidHistoryIntervalError(
+            "La fréquence doit être un nombre entier de minutes entre "
+            f"{HISTORY_INTERVAL_MIN} et {HISTORY_INTERVAL_MAX}."
+        )
 
 
 async def _async_load(hass: HomeAssistant) -> dict[str, Any]:
     data = await _store(hass).async_load()
     if data is None:
         data = {"settings": _default_settings(), "rooms": {}}
-    data.setdefault("settings", _default_settings())
+    settings = data.setdefault("settings", _default_settings())
+    # Paramètres ajoutés après coup (spec 010 : `history_interval`) :
+    # complétés clé par clé pour les installations existantes.
+    for key, value in _default_settings().items():
+        settings.setdefault(key, value)
     data.setdefault("rooms", {})
     return data
 
@@ -139,11 +167,14 @@ async def async_remove_rooms(hass: HomeAssistant, room_ids: list[str]) -> list[s
 
 async def async_update_settings(hass: HomeAssistant, **changes: Any) -> dict[str, Any]:
     """Modifie un ou plusieurs paramètres généraux (FR-010 à FR-011,
-    FR-022). Valide `default_temperature` si fourni (FR-008). Émet
+    FR-022). Valide `default_temperature` si fourni (FR-008) et
+    `history_interval` (spec 010, FR-011). Émet
     `heatwise_schedule_updated` avec `{"room_ids": None}` (concerne
     toute la maison)."""
     if "default_temperature" in changes and changes["default_temperature"] is not None:
         schedule_module.validate_temperature(changes["default_temperature"])
+    if "history_interval" in changes and changes["history_interval"] is not None:
+        validate_history_interval(changes["history_interval"])
 
     async with _lock(hass):
         data = await _async_load(hass)

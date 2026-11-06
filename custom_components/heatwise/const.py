@@ -51,3 +51,22 @@ REGULATION_RESEND = timedelta(minutes=15)
 # Suspension de la régulation d'une pièce après une action manuelle
 # (FR-015, research R6).
 MANUAL_SUSPENSION = timedelta(hours=1)
+
+# --- Historique des mesures (spec 010) ---
+# Fréquence d'enregistrement, en minutes (FR-009).
+HISTORY_INTERVAL_DEFAULT = 10
+HISTORY_INTERVAL_MIN = 1
+HISTORY_INTERVAL_MAX = 60
+# Base SQLite propre à Heatwise, dans le dossier de configuration HA
+# (research R1).
+HISTORY_DB_FILENAME = "heatwise_history.db"
+# Périodes du graphique et pas minimal de regroupement, en secondes
+# (research R6).
+HISTORY_PERIODS = {
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
+}
+HISTORY_PERIOD_STEPS = {"24h": 60, "7d": 900, "30d": 3600}
+# Statut enregistré pour une pièce sans radiateur (data-model.md).
+HISTORY_STATUS_NO_RADIATOR = "no_radiator"

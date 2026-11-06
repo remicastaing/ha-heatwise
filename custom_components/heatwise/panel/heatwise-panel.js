@@ -1,5 +1,7 @@
 import { LitElement, html, css } from "./vendor/lit-core.min.js";
 import "./heatwise-schedule.js";
+import "./heatwise-history.js";
+import { formatMoment, regulationLabel } from "./heatwise-labels.js";
 
 const VIEW_MODE_STORAGE_KEY = "heatwise-panel-view-mode";
 // Spec 006 : seuil d'affichage « pile faible » (research R8). La règle
@@ -29,65 +31,10 @@ function isNumeric(value) {
   return value !== null && value !== undefined && value !== "" && !Number.isNaN(Number(value));
 }
 
-// « 14:32 » si c'est aujourd'hui, « le 09/10 à 14:32 » sinon.
-function formatMoment(iso) {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
-  const time = date.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
-  if (date.toDateString() === new Date().toDateString()) {
-    return time;
-  }
-  const day = date.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" });
-  return `le ${day} à ${time}`;
-}
-
 // « dernière mesure à 14:32 » / « dernière mesure le 09/10 à 14:32 ».
 function formatLastMeasure(iso) {
   const moment = formatMoment(iso);
   return `dernière mesure ${moment.startsWith("le ") ? moment : `à ${moment}`}`;
-}
-
-// Spec 008 : libellé de l'état de régulation d'une pièce (contrat
-// websocket-api.md). `kind` choisit le style : heating, idle, alert.
-function regulationLabel(regulation) {
-  const { status, reason, suspended_until: until } = regulation;
-  switch (status) {
-    case "heating":
-      return { kind: "heating", icon: "mdi:fire", text: "Chauffe" };
-    case "idle":
-      return {
-        kind: "idle",
-        icon: "mdi:thermostat-auto",
-        text: reason === "target_reached" ? "Consigne atteinte" : "Régulée",
-      };
-    case "safety_stop": {
-      const why = {
-        sensor_unavailable: "sonde indisponible",
-        sensor_stale: "sonde muette",
-        dongle_unreachable: "dongle injoignable",
-      }[reason] || reason;
-      return { kind: "alert", icon: "mdi:alert-outline", text: `Arrêt de sécurité : ${why}` };
-    }
-    case "suspended":
-      return {
-        kind: "idle",
-        icon: "mdi:hand-back-right-outline",
-        text: `Régulation suspendue (manuel)${until ? ` jusqu'à ${formatMoment(until)}` : ""}`,
-      };
-    case "not_regulated":
-      return {
-        kind: "idle",
-        icon: "mdi:thermostat-off",
-        text:
-          reason === "rfplayer_not_configured"
-            ? "Non régulée : dongle non configuré"
-            : "Non régulée : pas de sonde",
-      };
-    default:
-      return null;
-  }
 }
 
 // Recherche insensible à la casse et aux accents.
@@ -139,6 +86,7 @@ class HeatwisePanel extends LitElement {
     _roomDeletion: { state: true },
     _orphanRadiators: { state: true },
     _scheduleRoom: { state: true },
+    _historyRoom: { state: true },
     _generalSettingsDialog: { state: true },
     _generalSettings: { state: true },
   };
@@ -169,7 +117,8 @@ class HeatwisePanel extends LitElement {
       min-height: 100%;
     }
 
-    heatwise-schedule {
+    heatwise-schedule,
+    heatwise-history {
       flex: 1;
       min-height: 0;
     }
@@ -306,6 +255,10 @@ class HeatwisePanel extends LitElement {
       color: var(--hw-text);
     }
 
+    .dialog input + label {
+      margin-top: 14px;
+    }
+
     .dialog-error {
       font-size: 12px;
       color: #b3261e;
@@ -436,6 +389,12 @@ class HeatwisePanel extends LitElement {
     .pill-button.radiator {
       border: 1px dashed var(--hw-border);
       color: var(--hw-text-secondary);
+    }
+
+    .pill-button.history {
+      border: 1px solid var(--hw-border);
+      color: var(--hw-text);
+      margin-top: 12px;
     }
 
     .room-list {
@@ -863,8 +822,9 @@ class HeatwisePanel extends LitElement {
     this._settingsDialog = null;
     this._radiatorDeletion = null;
     this._scheduleRoom = null;
+    this._historyRoom = null;
     this._generalSettingsDialog = null;
-    this._generalSettings = { default_temperature: 16, vacation_mode: false };
+    this._generalSettings = { default_temperature: 16, vacation_mode: false, history_interval: 10 };
     this._minuteTimer = null;
     this._unsubEvents = [];
   }
@@ -908,6 +868,17 @@ class HeatwisePanel extends LitElement {
     await this._loadRooms();
   }
 
+  // Spec 010 : historique d'une pièce, depuis le pavé ou ses paramètres.
+  _openHistoryView(room) {
+    this._settingsDialog = null;
+    this._renameDraft = null;
+    this._historyRoom = { room_id: room.room_id, name: room.name };
+  }
+
+  _closeHistoryView() {
+    this._historyRoom = null;
+  }
+
   // --- Paramètres généraux et mode vacances (US4, US7) ---
 
   async _loadGeneralSettings() {
@@ -925,6 +896,7 @@ class HeatwisePanel extends LitElement {
     await this._loadGeneralSettings();
     this._generalSettingsDialog = {
       defaultTemperature: String(this._generalSettings.default_temperature),
+      historyInterval: String(this._generalSettings.history_interval ?? 10),
       error: null,
     };
   }
@@ -941,6 +913,14 @@ class HeatwisePanel extends LitElement {
     };
   }
 
+  _onHistoryIntervalInput(event) {
+    this._generalSettingsDialog = {
+      ...this._generalSettingsDialog,
+      historyInterval: event.target.value,
+      error: null,
+    };
+  }
+
   async _saveGeneralSettings() {
     const value = Number(this._generalSettingsDialog.defaultTemperature);
     if (Number.isNaN(value) || value < 7 || value > 25) {
@@ -950,10 +930,20 @@ class HeatwisePanel extends LitElement {
       };
       return;
     }
+    // Spec 010 (FR-009, FR-011) : fréquence de l'historique.
+    const interval = Number(this._generalSettingsDialog.historyInterval);
+    if (!Number.isInteger(interval) || interval < 1 || interval > 60) {
+      this._generalSettingsDialog = {
+        ...this._generalSettingsDialog,
+        error: "La fréquence doit être un nombre entier de minutes entre 1 et 60.",
+      };
+      return;
+    }
     try {
       const response = await this.hass.connection.sendMessagePromise({
         type: "heatwise/update_settings",
         default_temperature: value,
+        history_interval: interval,
       });
       this._generalSettings = response.settings;
       this._generalSettingsDialog = null;
@@ -961,7 +951,10 @@ class HeatwisePanel extends LitElement {
     } catch (err) {
       this._generalSettingsDialog = {
         ...this._generalSettingsDialog,
-        error: "Température invalide : entre 7 et 25 °C, par pas de 0,5.",
+        error:
+          err && err.code === "invalid_history_interval"
+            ? err.message
+            : "Température invalide : entre 7 et 25 °C, par pas de 0,5.",
       };
     }
   }
@@ -1735,6 +1728,17 @@ class HeatwisePanel extends LitElement {
   }
 
   render() {
+    if (this._historyRoom) {
+      return html`
+        <heatwise-history
+          .hass=${this.hass}
+          .roomId=${this._historyRoom.room_id}
+          .roomName=${this._historyRoom.name}
+          @close=${this._closeHistoryView}
+        ></heatwise-history>
+      `;
+    }
+
     if (this._scheduleRoom) {
       return html`
         <heatwise-schedule
@@ -1816,7 +1820,7 @@ class HeatwisePanel extends LitElement {
   }
 
   _renderGeneralSettingsDialog() {
-    const { defaultTemperature, error } = this._generalSettingsDialog;
+    const { defaultTemperature, historyInterval, error } = this._generalSettingsDialog;
     return html`
       <div class="dialog-overlay">
         <div class="dialog">
@@ -1840,6 +1844,18 @@ class HeatwisePanel extends LitElement {
               step="0.5"
               .value=${defaultTemperature}
               @input=${this._onDefaultTemperatureInput}
+            />
+            <label for="hw-history-interval">
+              Fréquence d'enregistrement de l'historique (minutes)
+            </label>
+            <input
+              id="hw-history-interval"
+              type="number"
+              min="1"
+              max="60"
+              step="1"
+              .value=${historyInterval}
+              @input=${this._onHistoryIntervalInput}
             />
             ${error ? html`<p class="dialog-error">${error}</p>` : ""}
           </div>
@@ -1962,6 +1978,12 @@ class HeatwisePanel extends LitElement {
         </div>
         ${draft.error ? html`<p class="dialog-error">${draft.error}</p>` : ""}
       </div>
+      <div>
+        <button class="pill-button history" @click=${() => this._openHistoryView(room)}>
+          <ha-icon icon="mdi:chart-line"></ha-icon>
+          Historique
+        </button>
+      </div>
     `;
   }
 
@@ -2008,6 +2030,10 @@ class HeatwisePanel extends LitElement {
                 </p>
                 <ul class="hint deletion-summary">
                   <li>Sa programmation sera effacée.</li>
+                  <li>
+                    Son historique sera conservé mais ne sera plus
+                    consultable.
+                  </li>
                   ${room.has_sensor
                     ? html`<li>
                         La sonde « ${sensorName} » reste dans Home Assistant,
@@ -2828,6 +2854,14 @@ class HeatwisePanel extends LitElement {
           <ha-icon icon=${room.icon || "mdi:home-outline"}></ha-icon>
         </div>
         <span class="room-name">${room.name}</span>
+        <button
+          class="icon-button"
+          aria-label="Historique"
+          title="Historique"
+          @click=${() => this._openHistoryView(room)}
+        >
+          <ha-icon icon="mdi:chart-line"></ha-icon>
+        </button>
         <button
           class="icon-button"
           aria-label="Programmation"

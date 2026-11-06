@@ -25,7 +25,9 @@ Les itérations suivantes ont ajouté la programmation (spec 005), les
 sondes (specs 006 et 007) puis la régulation automatique de chaque pièce
 (`specs/008-heatwise-regulation-auto/`), puis le renommage et la
 suppression d'une pièce depuis le panneau
-(`specs/009-heatwise-renommer-supprimer-piece/`).
+(`specs/009-heatwise-renommer-supprimer-piece/`), et enfin l'historique
+des températures et de l'hygrométrie
+(`specs/010-heatwise-historique-mesures/`).
 
 Le protocole radio est documenté en détail dans `docs/rfplayer-x2d.md` du
 dépôt privé (essais réels sur du matériel Delta Dore / RFPlayer).
@@ -144,6 +146,26 @@ dongle ci-dessus) :
    supprime (arrêt puis dissociation). Un radiateur sans pièce ne
    chauffe jamais. Une pièce recréée ensuite sous le même nom part
    vierge.
+
+   L'historique d'une pièce supprimée est conservé mais n'est plus
+   consultable ; une pièce recréée sous le même nom repart avec un
+   historique vide.
+9. **Historique** : icône « courbe » du pavé, ou bouton « Historique »
+   des paramètres de la pièce. Le graphique montre la température et
+   l'humidité mesurées, la consigne (en pointillés) et, en fond, les
+   périodes de chauffe, de régulation suspendue, d'arrêt de sécurité ou
+   de pièce non régulée, sur 24 h, 7 jours ou 30 jours. Toucher ou
+   survoler la courbe affiche les valeurs et l'état à cet instant. Une
+   sonde indisponible, muette depuis plus d'1 h, ou Home Assistant
+   arrêté laissent un trou : aucune valeur n'est inventée.
+
+   Chaque point est la moyenne des mesures valables reçues pendant
+   l'intervalle. La fréquence d'enregistrement se règle dans les
+   paramètres Heatwise (icône ⚙ de la barre d'outils) : de 1 à 60 min,
+   10 min par défaut, prise en compte immédiatement. L'historique est
+   conservé sans limite de durée dans `heatwise_history.db` (dossier de
+   configuration de Home Assistant, inclus dans ses sauvegardes) :
+   environ 1 Mo par pièce et par an à 10 min, dix fois plus à 1 min.
 
 ## Entités exposées
 

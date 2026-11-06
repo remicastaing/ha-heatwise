@@ -18,7 +18,8 @@ from . import rooms as rooms_module
 from . import schedule as schedule_module
 from . import schedules_store
 from . import sensors as sensors_module
-from .const import DOMAIN
+from .const import DOMAIN, HISTORY_PERIODS
+from .history_recorder import HistoryUnavailableError, get_history_recorder
 from .regulator import get_regulator
 from .rfplayer_client import RFPlayerClient, RFPlayerUnreachable
 from .rooms import InvalidRoomNameError
@@ -546,6 +547,9 @@ async def handle_get_settings(hass, connection, msg):
         "type": "heatwise/update_settings",
         vol.Optional("default_temperature"): vol.Coerce(float),
         vol.Optional("vacation_mode"): bool,
+        # Validé par `schedules_store` (entier 1–60) pour répondre
+        # `invalid_history_interval` plutôt qu'une erreur de format (spec 010).
+        vol.Optional("history_interval"): vol.Any(int, float),
     }
 )
 @websocket_api.require_admin
@@ -555,7 +559,9 @@ async def handle_update_settings(hass, connection, msg):
     # d'eux le validerait quand même, il faut donc ce contrôle explicite
     # (FR-011/FR-022 : au moins un champ à modifier).
     changes = {
-        key: msg[key] for key in ("default_temperature", "vacation_mode") if key in msg
+        key: msg[key]
+        for key in ("default_temperature", "vacation_mode", "history_interval")
+        if key in msg
     }
     if not changes:
         connection.send_error(
@@ -568,8 +574,41 @@ async def handle_update_settings(hass, connection, msg):
     except schedule_module.InvalidTemperatureError as err:
         connection.send_error(msg["id"], "invalid_temperature", str(err))
         return
+    except schedules_store.InvalidHistoryIntervalError as err:
+        connection.send_error(msg["id"], "invalid_history_interval", str(err))
+        return
 
     connection.send_result(msg["id"], {"settings": settings})
+
+
+# --- Historique (spec 010) ---
+
+
+@websocket_api.websocket_command(
+    {
+        "type": "heatwise/get_room_history",
+        "room_id": str,
+        "period": vol.In(list(HISTORY_PERIODS)),
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def handle_get_room_history(hass, connection, msg):
+    area = ar.async_get(hass).async_get_area(msg["room_id"])
+    if area is None:
+        connection.send_error(msg["id"], "room_not_found", "Pièce introuvable.")
+        return
+    recorder = get_history_recorder(hass)
+    try:
+        if recorder is None:
+            raise HistoryUnavailableError
+        history = await recorder.async_get_room_history(area, msg["period"])
+    except HistoryUnavailableError:
+        connection.send_error(
+            msg["id"], "history_unavailable", "Historique indisponible."
+        )
+        return
+    connection.send_result(msg["id"], history)
 
 
 # --- Sondes (spec 006) ---
@@ -694,6 +733,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, handle_copy_room_schedule)
     websocket_api.async_register_command(hass, handle_get_settings)
     websocket_api.async_register_command(hass, handle_update_settings)
+    websocket_api.async_register_command(hass, handle_get_room_history)
     websocket_api.async_register_command(hass, handle_list_sensors)
     websocket_api.async_register_command(hass, handle_set_room_sensor)
     websocket_api.async_register_command(hass, handle_pair_sensor)

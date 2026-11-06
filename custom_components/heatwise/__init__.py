@@ -9,7 +9,8 @@ restent disponibles, seules les commandes radiateurs répondent
 `rfplayer_not_configured`. Au démarrage, tous les radiateurs déjà
 enregistrés sont forcés à l'arrêt (FR-021, principe I de la constitution),
 puis la régulation automatique démarre (spec 008, `regulator.py`) : elle
-ne rallume une pièce que sur une mesure valide de sa sonde.
+ne rallume une pièce que sur une mesure valide de sa sonde. L'historique
+des mesures (spec 010, `history_recorder.py`) démarre en dernier.
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from homeassistant.core import HomeAssistant
 
 from . import radiators, websocket_api
 from .const import DOMAIN
+from .history_recorder import HistoryRecorder
 from .regulator import Regulator
 from .rfplayer_client import RFPlayerClient
 
@@ -64,6 +66,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN]["regulator"] = regulator
     await regulator.async_start()
 
+    # Spec 010 : l'historique lit la régulation, il démarre après elle ;
+    # une base inutilisable est journalisée sans bloquer le setup.
+    history = HistoryRecorder(hass)
+    hass.data[DOMAIN]["history"] = history
+    await history.async_start()
+
     return True
 
 
@@ -74,6 +82,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         pass
 
     domain_data = hass.data.get(DOMAIN)
+    history = domain_data.pop("history", None) if domain_data else None
+    if history is not None:
+        await history.async_stop()
+
     # Spec 008 (research R7) : arrêter la régulation, puis les radiateurs
     # (best-effort), pour qu'aucun ne chauffe sans pilote après le
     # déchargement.
