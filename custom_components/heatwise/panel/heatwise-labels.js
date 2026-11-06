@@ -16,18 +16,27 @@ export function formatMoment(iso) {
 }
 
 // Spec 008 : libellé de l'état de régulation d'une pièce (contrat
-// websocket-api.md). `kind` choisit le style : heating, idle, alert.
-export function regulationLabel(regulation) {
+// websocket-api.md). `kind` choisit le style : heating, manual, ok, idle,
+// alert. Spec 011 : `heating` (facultatif, au moins un radiateur de la
+// pièce en chauffe) distingue une chauffe manuelle en cours d'une simple
+// suspension — y compris pour une pièce sans sonde. Le graphique
+// d'historique ne le passe pas et garde ses libellés.
+export function regulationLabel(regulation, heating = false) {
   const { status, reason, suspended_until: until } = regulation;
+  if (until && heating) {
+    return {
+      kind: "manual",
+      icon: "mdi:fire",
+      text: `Chauffe manuelle jusqu'à ${formatMoment(until)}`,
+    };
+  }
   switch (status) {
     case "heating":
       return { kind: "heating", icon: "mdi:fire", text: "Chauffe" };
     case "idle":
-      return {
-        kind: "idle",
-        icon: "mdi:thermostat-auto",
-        text: reason === "target_reached" ? "Consigne atteinte" : "Régulée",
-      };
+      return reason === "target_reached"
+        ? { kind: "ok", icon: "mdi:check-circle-outline", text: "Consigne atteinte" }
+        : { kind: "idle", icon: "mdi:thermostat-auto", text: "Régulée" };
     case "safety_stop": {
       const why = {
         sensor_unavailable: "sonde indisponible",

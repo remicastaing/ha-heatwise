@@ -23,6 +23,12 @@ function formatMeasuredTemperature(value) {
   });
 }
 
+// HACS nomme les versions d'après les tags (« v0.0.6 ») ; le manifeste
+// ne porte pas le « v » (spec 011, research R6).
+function normalizeVersion(value) {
+  return value ? String(value).replace(/^v/i, "") : value;
+}
+
 function formatHumidity(value) {
   return `${Math.round(Number(value))} %`;
 }
@@ -89,6 +95,12 @@ class HeatwisePanel extends LitElement {
     _historyRoom: { state: true },
     _generalSettingsDialog: { state: true },
     _generalSettings: { state: true },
+    // Spec 011 : version et mises à jour (US3), chauffe 1 h (US2).
+    _info: { state: true },
+    _updateDialog: { state: true },
+    _updateError: { state: true },
+    _roomHeatingBusy: { state: true },
+    _roomNotices: { state: true },
   };
 
   static styles = css`
@@ -128,12 +140,77 @@ class HeatwisePanel extends LitElement {
       font-size: 14px;
     }
 
-    .toolbar {
+    /* Spec 011 (FR-017) : en-tête — nom, version, actions générales. */
+    .hw-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-wrap: wrap;
       gap: 12px;
       margin-bottom: 18px;
+    }
+
+    .hw-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--hw-text);
+      --mdc-icon-size: 26px;
+    }
+
+    .hw-title ha-icon {
+      color: var(--hw-accent);
+    }
+
+    .hw-title h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 600;
+    }
+
+    .version-chip {
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--hw-accent-soft);
+      color: var(--hw-accent);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .update-banner {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      background: var(--hw-accent-soft);
+      border: 1px solid var(--hw-accent-border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      margin-bottom: 16px;
+      color: var(--hw-text);
+      font-size: 13px;
+      --mdc-icon-size: 18px;
+    }
+
+    .update-banner.alert {
+      background: rgba(179, 38, 30, 0.08);
+      border-color: rgba(179, 38, 30, 0.35);
+      color: var(--error-color, #b3261e);
+    }
+
+    .update-banner .grow {
+      flex: 1;
+      min-width: 160px;
+    }
+
+    .update-banner a {
+      color: var(--hw-accent);
+      font-weight: 600;
+    }
+
+    .button-primary.small {
+      padding: 6px 12px;
+      font-size: 13px;
     }
 
     .view-toggle {
@@ -328,15 +405,9 @@ class HeatwisePanel extends LitElement {
       color: var(--hw-text);
     }
 
-    .temperature-row {
-      display: flex;
-      align-items: baseline;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
 
     .current-temperature {
-      font-size: 28px;
+      font-size: 34px;
       font-weight: 600;
       color: var(--hw-text);
       line-height: 1;
@@ -421,40 +492,202 @@ class HeatwisePanel extends LitElement {
 
     .room-row .room-name {
       flex-grow: 0;
-      width: 160px;
+      width: 140px;
       flex-shrink: 0;
     }
 
-    .room-row .temperature-row {
-      flex-grow: 1;
-      margin: 0;
-    }
 
     .room-row .current-temperature {
       font-size: 18px;
     }
 
-    .regulation {
+    /* Spec 011 (FR-018a) : puce d'état de régulation. */
+    .regulation-chip {
       display: inline-flex;
       align-items: center;
-      gap: 4px;
-      flex-basis: 100%;
-      font-size: 13px;
+      align-self: flex-start;
+      gap: 5px;
+      padding: 4px 10px;
+      border: 1px solid var(--hw-border);
+      border-radius: 999px;
+      background: var(--hw-bg);
       color: var(--hw-text-secondary);
+      font-size: 12.5px;
+      font-weight: 600;
+      --mdc-icon-size: 15px;
+    }
+
+    .regulation-chip.heating,
+    .regulation-chip.manual {
+      color: var(--state-climate-heat-color, #ff8100);
+      background: rgba(255, 129, 0, 0.12);
+      border-color: rgba(255, 129, 0, 0.35);
+    }
+
+    .regulation-chip.ok {
+      color: var(--success-color, #43a047);
+      background: rgba(67, 160, 71, 0.1);
+      border-color: rgba(67, 160, 71, 0.3);
+    }
+
+    .regulation-chip.alert {
+      color: var(--error-color, #b3261e);
+      background: rgba(179, 38, 30, 0.08);
+      border-color: rgba(179, 38, 30, 0.3);
+    }
+
+    .room-card.heating,
+    .room-card.manual,
+    .room-row.heating,
+    .room-row.manual {
+      border-color: rgba(255, 129, 0, 0.45);
+    }
+
+    .room-actions {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+    }
+
+    .measure-block {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .measure-main {
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .measure-secondary {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .target-temperature {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      --mdc-icon-size: 15px;
+    }
+
+    /* Spec 011 (US2) : action de chauffe en pied de pavé. */
+    .room-footer {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: auto;
+      padding-top: 12px;
+      border-top: 1px solid var(--hw-border);
+    }
+
+    .heat-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 14px;
+      border: 1px solid rgba(255, 129, 0, 0.45);
+      border-radius: 999px;
+      background: transparent;
+      color: var(--state-climate-heat-color, #ff8100);
+      font-size: 13px;
+      font-weight: 600;
+      white-space: nowrap;
+      cursor: pointer;
       --mdc-icon-size: 16px;
     }
 
-    .regulation.heating {
-      color: var(--hw-accent);
-      font-weight: 600;
+    .heat-button.stop {
+      background: var(--state-climate-heat-color, #ff8100);
+      border-color: transparent;
+      color: #ffffff;
     }
 
-    .regulation.alert {
+    .heat-button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+
+    .room-notice {
+      flex: 1;
+      font-size: 12px;
       color: var(--error-color, #b3261e);
     }
 
-    .room-row .regulation {
-      flex-basis: auto;
+    .room-identity {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+
+    .room-row .measure-block {
+      flex-direction: row;
+      align-items: center;
+      flex-wrap: wrap;
+      flex: 1 1 auto;
+      min-width: 0;
+      gap: 4px 12px;
+    }
+
+    .room-row .regulation-chip {
+      display: block;
+      align-self: center;
+      max-width: 100%;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .room-row .regulation-chip ha-icon {
+      vertical-align: -3px;
+      margin-right: 4px;
+    }
+
+    .room-row .heat-button,
+    .room-row .room-actions {
+      flex-shrink: 0;
+    }
+
+    .room-row .room-notice {
+      flex: 0 1 auto;
+    }
+
+    @media (max-width: 600px) {
+      :host {
+        padding: 16px;
+      }
+
+      .hw-header .header-actions {
+        width: 100%;
+        flex-wrap: wrap;
+      }
+
+      .toolbar-button .label {
+        display: none;
+      }
+
+      .rooms {
+        grid-template-columns: 1fr;
+      }
+
+      .room-row {
+        flex-wrap: wrap;
+      }
+
+      .room-row .room-identity {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+
+      .room-row .room-name {
+        width: auto;
+      }
     }
 
     .target-temperature-icon {
@@ -827,6 +1060,11 @@ class HeatwisePanel extends LitElement {
     this._generalSettings = { default_temperature: 16, vacation_mode: false, history_interval: 10 };
     this._minuteTimer = null;
     this._unsubEvents = [];
+    this._info = null;
+    this._updateDialog = null;
+    this._updateError = null;
+    this._roomHeatingBusy = {};
+    this._roomNotices = {};
   }
 
   connectedCallback() {
@@ -982,6 +1220,7 @@ class HeatwisePanel extends LitElement {
       this._loaded = true;
       this._loadRooms();
       this._loadGeneralSettings();
+      this._loadInfo();
       // `area_registry_updated` : association de sonde faite depuis
       // Heatwise ou depuis Paramètres → Zones (spec 006, research R7).
       // `heatwise_regulation_updated` : état de régulation d'une pièce
@@ -1026,6 +1265,125 @@ class HeatwisePanel extends LitElement {
     }
     if (this._roomDeletion && !this._roomById(this._roomDeletion.room.room_id)) {
       this._roomDeletion = null;
+    }
+  }
+
+  // --- Spec 011 : chauffer 1 h une pièce (US2) ---
+
+  // Chauffe manuelle en cours : suspension de la pièce et au moins un
+  // radiateur en chauffe (data-model, « État exposé au panneau »).
+  _roomManualHeating(room) {
+    return !!(room.regulation && room.regulation.suspended_until && room.heating);
+  }
+
+  async _setRoomManualHeating(room, heating) {
+    const roomId = room.room_id;
+    if (this._roomHeatingBusy[roomId]) {
+      return;
+    }
+    this._roomHeatingBusy = { ...this._roomHeatingBusy, [roomId]: true };
+    this._roomNotices = { ...this._roomNotices, [roomId]: null };
+    let notice = null;
+    try {
+      const response = await this.hass.connection.sendMessagePromise({
+        type: "heatwise/set_room_manual_heating",
+        room_id: roomId,
+        heating,
+      });
+      this._rooms = this._rooms.map((r) => (r.room_id === roomId ? response.room : r));
+      const failed = response.failed_radiator_ids || [];
+      if (failed.length) {
+        notice =
+          failed.length === 1
+            ? "Un radiateur n'a pas reçu l'ordre : dongle injoignable."
+            : `${failed.length} radiateurs n'ont pas reçu l'ordre : dongle injoignable.`;
+      }
+    } catch (err) {
+      notice =
+        err && err.code === "room_without_radiator"
+          ? "Cette pièce n'a aucun radiateur."
+          : this._pairingErrorMessage(err || {});
+    }
+    const { [roomId]: _done, ...busy } = this._roomHeatingBusy;
+    this._roomHeatingBusy = busy;
+    this._roomNotices = { ...this._roomNotices, [roomId]: notice };
+  }
+
+  // --- Spec 011 : version et mises à jour via HACS (US3) ---
+
+  async _loadInfo() {
+    try {
+      this._info = await this.hass.connection.sendMessagePromise({
+        type: "heatwise/get_info",
+      });
+    } catch (err) {
+      this._info = null;
+    }
+  }
+
+  // État dérivé de l'entité `update` HACS (data-model, « Information de
+  // mise à jour ») : none, available, installing, restart.
+  _updateStatus() {
+    const info = this._info;
+    if (!info) {
+      return null;
+    }
+    const version = normalizeVersion(info.version);
+    const entityId = info.update_entity_id;
+    const state = entityId && this.hass ? this.hass.states[entityId] : null;
+    const base = { version, entityId, kind: "none" };
+    if (!state) {
+      return base;
+    }
+    const attrs = state.attributes;
+    const installed = normalizeVersion(attrs.installed_version);
+    const latest = normalizeVersion(attrs.latest_version);
+    if (attrs.in_progress) {
+      const progress =
+        typeof attrs.update_percentage === "number"
+          ? attrs.update_percentage
+          : typeof attrs.in_progress === "number"
+            ? attrs.in_progress
+            : null;
+      return { ...base, kind: "installing", latest, progress };
+    }
+    if (installed && version && installed !== version) {
+      return { ...base, kind: "restart", installed };
+    }
+    if (state.state === "on" && latest) {
+      return { ...base, kind: "available", latest, releaseUrl: attrs.release_url };
+    }
+    return base;
+  }
+
+  _askUpdate() {
+    this._updateDialog = { step: "install", status: this._updateStatus() };
+  }
+
+  _askRestart() {
+    this._updateDialog = { step: "restart", status: this._updateStatus() };
+  }
+
+  _closeUpdateDialog() {
+    this._updateDialog = null;
+  }
+
+  async _confirmUpdateDialog() {
+    const { step, status } = this._updateDialog;
+    this._updateDialog = null;
+    this._updateError = null;
+    try {
+      if (step === "install") {
+        // L'avancement se lit ensuite sur l'entité (`in_progress`).
+        await this.hass.callService("update", "install", { entity_id: status.entityId });
+      } else {
+        await this.hass.callService("homeassistant", "restart", {});
+      }
+    } catch (err) {
+      this._updateError =
+        step === "install"
+          ? `La mise à jour a échoué${err && err.message ? ` : ${err.message}` : ""}.`
+          : "Le redémarrage de Home Assistant n'a pas pu être lancé.";
     }
   }
 
@@ -1754,7 +2112,17 @@ class HeatwisePanel extends LitElement {
 
     return html`
       <div class="rooms-view">
-        <div class="toolbar">
+        <header class="hw-header">
+          <div class="hw-title">
+            <ha-icon icon="mdi:radiator"></ha-icon>
+            <h1>Heatwise</h1>
+            ${this._info && this._info.version
+              ? html`<span class="version-chip" title="Version installée">
+                  v${normalizeVersion(this._info.version)}
+                </span>`
+              : ""}
+          </div>
+          <div class="header-actions">
           <div class="view-toggle">
             <button
               class="view-toggle-button ${this._viewMode === "grid" ? "active" : ""}"
@@ -1771,7 +2139,6 @@ class HeatwisePanel extends LitElement {
               <ha-icon icon="mdi:view-list-outline"></ha-icon>
             </button>
           </div>
-          <div class="header-actions">
             <button
               class="toolbar-button ${this._generalSettings.vacation_mode ? "active" : ""}"
               aria-label="Mode vacances"
@@ -1779,7 +2146,7 @@ class HeatwisePanel extends LitElement {
               @click=${this._toggleVacationMode}
             >
               <ha-icon icon="mdi:beach"></ha-icon>
-              Mode vacances
+              <span class="label">Mode vacances</span>
             </button>
             <button
               class="toolbar-button"
@@ -1789,12 +2156,14 @@ class HeatwisePanel extends LitElement {
             >
               <ha-icon icon="mdi:cog"></ha-icon>
             </button>
+            <button class="button-primary" @click=${this._openCreateDialog}>
+              <ha-icon icon="mdi:plus"></ha-icon>
+              Créer une pièce
+            </button>
           </div>
-          <button class="button-primary" @click=${this._openCreateDialog}>
-            <ha-icon icon="mdi:plus"></ha-icon>
-            Créer une pièce
-          </button>
-        </div>
+        </header>
+
+        ${this._renderUpdateBanner()}
 
         ${this._generalSettings.vacation_mode
           ? html`<div class="vacation-banner">
@@ -1816,6 +2185,97 @@ class HeatwisePanel extends LitElement {
       ${this._radiatorDeletion ? this._renderRadiatorDeletionDialog() : ""}
       ${this._pairing ? this._renderPairingDialog() : ""}
       ${this._generalSettingsDialog ? this._renderGeneralSettingsDialog() : ""}
+      ${this._updateDialog ? this._renderUpdateDialog() : ""}
+    `;
+  }
+
+  // Spec 011 (US3, FR-013 à FR-015) : bandeau de mise à jour sous l'en-tête.
+  _renderUpdateBanner() {
+    if (this._updateError) {
+      return html`
+        <div class="update-banner alert" role="alert">
+          <ha-icon icon="mdi:alert-outline"></ha-icon>
+          <span class="grow">${this._updateError}</span>
+          <button class="icon-button" aria-label="Fermer" @click=${() => (this._updateError = null)}>
+            <ha-icon icon="mdi:close"></ha-icon>
+          </button>
+        </div>
+      `;
+    }
+    const status = this._updateStatus();
+    if (!status) {
+      return "";
+    }
+    switch (status.kind) {
+      case "available":
+        return html`
+          <div class="update-banner">
+            <ha-icon icon="mdi:package-up"></ha-icon>
+            <span class="grow">Mise à jour <strong>${status.latest}</strong> disponible.</span>
+            ${status.releaseUrl
+              ? html`<a href=${status.releaseUrl} target="_blank" rel="noopener noreferrer">
+                  Notes de version
+                </a>`
+              : ""}
+            <button class="button-primary small" @click=${this._askUpdate}>Mettre à jour</button>
+          </div>
+        `;
+      case "installing":
+        return html`
+          <div class="update-banner">
+            <ha-icon icon="mdi:progress-download"></ha-icon>
+            <span class="grow">
+              Installation de la version ${status.latest}…${status.progress != null
+                ? ` ${Math.round(status.progress)} %`
+                : ""}
+            </span>
+          </div>
+        `;
+      case "restart":
+        return html`
+          <div class="update-banner">
+            <ha-icon icon="mdi:restart"></ha-icon>
+            <span class="grow">
+              Version ${status.installed} installée : redémarrez Home Assistant
+              pour l'appliquer.
+            </span>
+            <button class="button-primary small" @click=${this._askRestart}>Redémarrer</button>
+          </div>
+        `;
+      default:
+        return "";
+    }
+  }
+
+  _renderUpdateDialog() {
+    const { step, status } = this._updateDialog;
+    const install = step === "install";
+    return html`
+      <div class="dialog-overlay">
+        <div class="dialog">
+          <div class="dialog-header">
+            <h2>${install ? `Mettre à jour vers ${status.latest}` : "Redémarrer Home Assistant"}</h2>
+            <button class="icon-button" aria-label="Fermer" @click=${this._closeUpdateDialog}>
+              <ha-icon icon="mdi:close"></ha-icon>
+            </button>
+          </div>
+          <p class="hint">
+            ${install
+              ? html`Heatwise ${status.version} sera remplacé par la version
+                  ${status.latest} via HACS. Un redémarrage de Home Assistant sera
+                  ensuite nécessaire.`
+              : html`Home Assistant va redémarrer pour appliquer la nouvelle
+                  version de Heatwise. Tous les radiateurs repartiront à l'arrêt
+                  puis la régulation reprendra.`}
+          </p>
+          <div class="dialog-actions">
+            <button class="button-secondary" @click=${this._closeUpdateDialog}>Annuler</button>
+            <button class="button-primary" @click=${this._confirmUpdateDialog}>
+              ${install ? "Mettre à jour" : "Redémarrer"}
+            </button>
+          </div>
+        </div>
+      </div>
     `;
   }
 
@@ -2847,13 +3307,27 @@ class HeatwisePanel extends LitElement {
     `;
   }
 
+  _renderRoomIdentity(room) {
+    return html`
+      <div class="room-icon">
+        <ha-icon icon=${room.icon || "mdi:home-outline"}></ha-icon>
+      </div>
+      <span class="room-name">${room.name}</span>
+    `;
+  }
+
   _renderRoomHeader(room) {
     return html`
       <div class="room-header">
-        <div class="room-icon">
-          <ha-icon icon=${room.icon || "mdi:home-outline"}></ha-icon>
-        </div>
-        <span class="room-name">${room.name}</span>
+        ${this._renderRoomIdentity(room)}
+        ${this._renderRoomActions(room)}
+      </div>
+    `;
+  }
+
+  _renderRoomActions(room) {
+    return html`
+      <div class="room-actions">
         <button
           class="icon-button"
           aria-label="Historique"
@@ -2911,40 +3385,51 @@ class HeatwisePanel extends LitElement {
           <span class="unavailable">
             Sonde indisponible${since ? ` depuis ${formatMoment(since)}` : ""}
           </span>
-          ${this._renderBatteryAlert(battery)}
         `;
       case "stale":
         return html`
           <span class="unavailable">
             Sonde indisponible — ${formatLastMeasure(since)}
           </span>
-          ${this._renderBatteryAlert(battery)}
         `;
       case "pending":
-        return html`
-          <span class="current-temperature">—</span>
-          ${this._renderBatteryAlert(battery)}
-        `;
+        return html`<span class="current-temperature">—</span>`;
       default:
         return html`
           <span class="current-temperature">${formatMeasuredTemperature(temperature)}°</span>
-          ${humidity !== null
-            ? html`<span class="current-humidity">
-                <ha-icon icon="mdi:water-percent"></ha-icon>${formatHumidity(humidity)}
-              </span>`
-            : ""}
-          ${this._renderBatteryAlert(battery)}
         `;
     }
   }
 
+  // Spec 011 (FR-018a) : humidité et pile, secondaires sous la mesure.
+  _renderSecondaryMeasures(room) {
+    const { status, humidity, battery } = this._sensorStatusFor(room);
+    if (status === "none" || status === "missing") {
+      return "";
+    }
+    const humidityPart =
+      status !== "unavailable" && status !== "stale" && status !== "pending" && humidity !== null
+        ? html`<span class="current-humidity">
+            <ha-icon icon="mdi:water-percent"></ha-icon>${formatHumidity(humidity)}
+          </span>`
+        : "";
+    const batteryPart = this._renderBatteryAlert(battery);
+    if (!humidityPart && !batteryPart) {
+      return "";
+    }
+    return html`<div class="measure-secondary">${humidityPart}${batteryPart}</div>`;
+  }
+
   _renderTemperatureRow(room) {
     return html`
-      <div class="temperature-row">
+      <div class="measure-block">
+        <div class="measure-main">
         ${this._renderMeasures(room)}
         ${room.has_radiator
           ? room.target_temperature != null
-            ? html`<span class="target-temperature">(${formatTargetTemperature(room.target_temperature)}°)</span>`
+            ? html`<span class="target-temperature" title="Consigne courante">
+                <ha-icon icon="mdi:target"></ha-icon>${formatTargetTemperature(room.target_temperature)}°
+              </span>`
             : html`
                 <span class="target-temperature-icon">
                   <ha-icon icon="mdi:radiator"></ha-icon>
@@ -2959,38 +3444,78 @@ class HeatwisePanel extends LitElement {
                 Radiateur
               </button>
             `}
+        </div>
+        ${this._renderSecondaryMeasures(room)}
         ${this._renderRegulation(room)}
       </div>
     `;
   }
 
   // État de la régulation automatique sous les mesures (spec 008, FR-017).
+  // Spec 011 (FR-018a) : puce colorée — libellé partagé avec
+  // l'historique (heatwise-labels.js).
   _renderRegulation(room) {
-    const label = room.regulation ? regulationLabel(room.regulation) : null;
+    const label = room.regulation ? regulationLabel(room.regulation, room.heating) : null;
     if (!label) {
       return "";
     }
     return html`
-      <span class="regulation ${label.kind}">
+      <span class="regulation-chip ${label.kind}" title=${label.text}>
         <ha-icon icon=${label.icon}></ha-icon>${label.text}
       </span>
     `;
   }
 
-  _renderRoomCard(room) {
+  // Spec 011 (US2, FR-005, FR-007) : « Chauffer 1 h » / « Arrêter la chauffe ».
+  _renderRoomHeatingButton(room) {
+    if (!room.has_radiator) {
+      return "";
+    }
+    const manual = this._roomManualHeating(room);
     return html`
-      <div class="room-card">
+      <button
+        class="heat-button ${manual ? "stop" : ""}"
+        ?disabled=${!!this._roomHeatingBusy[room.room_id]}
+        @click=${() => this._setRoomManualHeating(room, !manual)}
+      >
+        <ha-icon icon=${manual ? "mdi:fire-off" : "mdi:fire"}></ha-icon>
+        ${manual ? "Arrêter la chauffe" : "Chauffer 1 h"}
+      </button>
+    `;
+  }
+
+  _renderRoomNotice(room) {
+    const notice = this._roomNotices[room.room_id];
+    return notice ? html`<span class="room-notice" role="alert">${notice}</span>` : "";
+  }
+
+  _roomStateClass(room) {
+    if (this._roomManualHeating(room)) {
+      return "manual";
+    }
+    return room.heating ? "heating" : "";
+  }
+
+  _renderRoomCard(room) {
+    const button = this._renderRoomHeatingButton(room);
+    const notice = this._renderRoomNotice(room);
+    return html`
+      <div class="room-card ${this._roomStateClass(room)}">
         ${this._renderRoomHeader(room)}
         ${this._renderTemperatureRow(room)}
+        ${button || notice ? html`<div class="room-footer">${notice}${button}</div>` : ""}
       </div>
     `;
   }
 
   _renderRoomRow(room) {
     return html`
-      <div class="room-row">
-        ${this._renderRoomHeader(room)}
+      <div class="room-row ${this._roomStateClass(room)}">
+        <div class="room-identity">${this._renderRoomIdentity(room)}</div>
         ${this._renderTemperatureRow(room)}
+        ${this._renderRoomNotice(room)}
+        ${this._renderRoomHeatingButton(room)}
+        ${this._renderRoomActions(room)}
       </div>
     `;
   }

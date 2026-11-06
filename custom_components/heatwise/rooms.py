@@ -49,6 +49,7 @@ def _assemble_room(
     area: ar.AreaEntry,
     *,
     has_radiator: bool = False,
+    heating: bool = False,
     target_temperature: float | None = None,
     regulation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -92,6 +93,9 @@ def _assemble_room(
         "sensor_stale": sensors_module.is_stale(state, dt_util.utcnow()),
         "sensor_missing": has_sensor and state is None,
         "has_radiator": has_radiator,
+        # Spec 011 : au moins un radiateur de la pièce en chauffe (ordre
+        # transmis) — le panneau en dérive « Chauffe manuelle jusqu'à… ».
+        "heating": heating,
         # Consigne affichée uniquement (spec 005, FR-027) : la plage en
         # cours de la programmation applicable, ou la consigne hors
         # plage, pour les pièces avec radiateur ; aucun pilotage des
@@ -111,6 +115,7 @@ async def _async_assemble_areas(
     all_radiators = await radiators_module.async_list_radiators(hass)
     room_ids_with_radiator = {r["room_id"] for r in all_radiators}
     room_ids_with_radiator.discard(None)  # radiateurs sans pièce (spec 009)
+    room_ids_heating = {r["room_id"] for r in all_radiators if r["heating"]}
 
     all_schedules = await schedules_store.async_get_all(hass)
     settings = all_schedules["settings"]
@@ -136,6 +141,7 @@ async def _async_assemble_areas(
             hass,
             area,
             has_radiator=area.id in room_ids_with_radiator,
+            heating=area.id in room_ids_heating,
             target_temperature=_target_temperature(area.id),
             regulation=_regulation(area.id),
         )

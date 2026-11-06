@@ -13,6 +13,8 @@ jusqu'à ce que l'utilisateur le supprime (dissociation confirmée).
 """
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 import logging
 from typing import Any
 
@@ -29,9 +31,26 @@ _LOGGER = logging.getLogger(__name__)
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.radiators"
 MAX_TRANSMITTER_ID = 255
-MANUAL_HEATING_SECONDS = 3600  # FR-020 : 1h fixe, jamais renouvelée (FR-019)
+# FR-020 (spec 003) : 1 h fixe. Depuis la spec 011 (FR-002, FR-010), la
+# chauffe manuelle est renvoyée toutes les 5 min par le `Regulator`, mais
+# jamais prolongée au-delà d'1 h après la dernière action.
+MANUAL_HEATING_SECONDS = 3600
 
 _TIMERS_KEY = f"{DOMAIN}_radiator_auto_off_timers"
+
+# Échéance d'une chauffe manuelle déléguée à l'appelant (spec 011,
+# research R3) : reçoit `(radiator_id, token)`.
+ExpireCallback = Callable[[str, object], Awaitable[None]]
+
+
+@dataclass
+class _AutoOff:
+    """Minuterie d'arrêt automatique d'un radiateur. `token` identifie
+    cette minuterie-là : une échéance qui attend son tour ne doit pas
+    agir sur une minuterie relancée entre-temps (analyse U1)."""
+
+    unsub: Callable[[], None]
+    token: object
 
 
 class InvalidRadiatorNameError(Exception):
@@ -195,12 +214,12 @@ async def _async_set_heating_state(
 
 @callback
 def _cancel_auto_off(hass: HomeAssistant, radiator_id: str) -> None:
-    timers: dict[str, Any] | None = hass.data.get(_TIMERS_KEY)
+    timers: dict[str, _AutoOff] | None = hass.data.get(_TIMERS_KEY)
     if not timers:
         return
-    unsub = timers.pop(radiator_id, None)
-    if unsub is not None:
-        unsub()
+    timer = timers.pop(radiator_id, None)
+    if timer is not None:
+        timer.unsub()
 
 
 @callback
@@ -219,11 +238,31 @@ def async_cancel_all_auto_off_timers(hass: HomeAssistant) -> None:
     referme sur l'instance de client courante et ne doit jamais s'exécuter
     après sa fermeture (cf. `research.md`).
     """
-    timers: dict[str, Any] | None = hass.data.pop(_TIMERS_KEY, None)
+    timers: dict[str, _AutoOff] | None = hass.data.pop(_TIMERS_KEY, None)
     if not timers:
         return
-    for unsub in timers.values():
-        unsub()
+    for timer in timers.values():
+        timer.unsub()
+
+
+@callback
+def has_auto_off(hass: HomeAssistant, radiator_id: str) -> bool:
+    """Vrai si une chauffe manuelle du radiateur est en cours (minuterie
+    d'arrêt automatique armée) — seule condition pour renvoyer « marche »
+    hors régulation (spec 011, research R3)."""
+    return radiator_id in hass.data.get(_TIMERS_KEY, {})
+
+
+@callback
+def pop_auto_off_if(hass: HomeAssistant, radiator_id: str, token: object) -> bool:
+    """Retire la minuterie du radiateur seulement si c'est bien celle
+    identifiée par `token` ; faux si elle a été relancée ou annulée."""
+    timers: dict[str, _AutoOff] | None = hass.data.get(_TIMERS_KEY)
+    timer = timers.get(radiator_id) if timers else None
+    if timer is None or timer.token is not token:
+        return False
+    del timers[radiator_id]
+    return True
 
 
 async def async_set_heating(
@@ -232,6 +271,7 @@ async def async_set_heating(
     radiator_id: str,
     *,
     heating: bool,
+    on_expire: ExpireCallback | None = None,
 ) -> dict[str, Any]:
     """Bascule la chauffe d'un radiateur (FR-017 à FR-020).
 
@@ -239,6 +279,11 @@ async def async_set_heating(
     configuré, FR-022) — fourni par l'appelant plutôt que relu depuis
     `hass.data`, pour que la minuterie d'arrêt automatique planifiée ici
     referme sur l'instance en vigueur au moment de la demande.
+
+    `on_expire` (spec 011, research R3) : si fourni, l'échéance d'1 h lui
+    est déléguée avec le jeton de la minuterie — le `Regulator` exécute
+    alors l'arrêt sous son verrou, sérialisé avec ses renvois. Sinon,
+    l'arrêt est envoyé ici.
     """
     data = await _async_load(hass)
     entry = next(
@@ -257,11 +302,14 @@ async def async_set_heating(
     _cancel_auto_off(hass, radiator_id)
 
     if heating:
+        token = object()
 
         async def _async_auto_off(_now: Any) -> None:
-            timers: dict[str, Any] | None = hass.data.get(_TIMERS_KEY)
-            if timers is not None:
-                timers.pop(radiator_id, None)
+            if on_expire is not None:
+                await on_expire(radiator_id, token)
+                return
+            if not pop_auto_off_if(hass, radiator_id, token):
+                return
             try:
                 await client.async_set_heating(transmitter_id, heating=False)
             except RFPlayerUnreachable:
@@ -273,7 +321,7 @@ async def async_set_heating(
             await _async_set_heating_state(hass, transmitter_id, False)
 
         unsub = async_call_later(hass, MANUAL_HEATING_SECONDS, _async_auto_off)
-        hass.data.setdefault(_TIMERS_KEY, {})[radiator_id] = unsub
+        hass.data.setdefault(_TIMERS_KEY, {})[radiator_id] = _AutoOff(unsub, token)
 
     return await async_get_radiator(hass, radiator_id)
 
@@ -298,6 +346,13 @@ async def async_apply_regulation(
     transmitter_id = int(radiator_id)
     await client.async_set_heating(transmitter_id, heating=heating)
     await _async_set_heating_state(hass, transmitter_id, heating)
+
+
+async def async_mark_stopped(hass: HomeAssistant, radiator_id: str) -> None:
+    """Enregistre un radiateur comme arrêté sans ordre transmis : arrêt
+    automatique dû mais dongle injoignable (spec 011, research R3) — le
+    renvoi périodique retentera l'arrêt."""
+    await _async_set_heating_state(hass, int(radiator_id), False)
 
 
 async def async_cancel_room_auto_off(hass: HomeAssistant, room_id: str) -> None:

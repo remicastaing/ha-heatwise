@@ -9,7 +9,12 @@ import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import (
+    area_registry as ar,
+    device_registry as dr,
+    entity_registry as er,
+)
+from homeassistant.loader import async_get_integration
 from homeassistant.util import dt as dt_util
 
 from . import pairing as pairing_module
@@ -20,7 +25,7 @@ from . import schedules_store
 from . import sensors as sensors_module
 from .const import DOMAIN, HISTORY_PERIODS
 from .history_recorder import HistoryUnavailableError, get_history_recorder
-from .regulator import get_regulator
+from .regulator import RoomWithoutRadiatorError, get_regulator
 from .rfplayer_client import RFPlayerClient, RFPlayerUnreachable
 from .rooms import InvalidRoomNameError
 
@@ -310,6 +315,95 @@ async def handle_set_radiator_heating(hass, connection, msg):
         return
 
     connection.send_result(msg["id"], {"radiator": radiator})
+
+
+def _find_hacs_update_entity(
+    hass: HomeAssistant, documentation: str | None, name: str
+) -> str | None:
+    """Entité `update` que HACS crée pour Heatwise (spec 011, research
+    R6) : retrouvée par l'URL de dépôt de son appareil (= `documentation`
+    du manifeste), à défaut par son titre. `None` sans HACS."""
+    device_registry = dr.async_get(hass)
+    candidates = [
+        entry
+        for entry in er.async_get(hass).entities.values()
+        if entry.domain == "update" and entry.platform == "hacs"
+    ]
+    wanted = (documentation or "").rstrip("/").lower()
+    for entry in candidates:
+        device = device_registry.async_get(entry.device_id) if entry.device_id else None
+        url = (device.configuration_url or "") if device else ""
+        if wanted and url.rstrip("/").lower() == wanted:
+            return entry.entity_id
+    for entry in candidates:
+        state = hass.states.get(entry.entity_id)
+        if state is not None and state.attributes.get("title") == name:
+            return entry.entity_id
+    return None
+
+
+@websocket_api.websocket_command({"type": "heatwise/get_info"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def handle_get_info(hass, connection, msg):
+    """Version en cours d'exécution et entité de mise à jour HACS (spec
+    011, FR-012, FR-013). La version est celle du manifeste chargé au
+    démarrage : elle diffère de `installed_version` de l'entité HACS
+    tant que Home Assistant n'a pas redémarré après une mise à jour."""
+    integration = await async_get_integration(hass, DOMAIN)
+    connection.send_result(
+        msg["id"],
+        {
+            "version": str(integration.version) if integration.version else None,
+            "update_entity_id": _find_hacs_update_entity(
+                hass, integration.documentation, integration.name
+            ),
+        },
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        "type": "heatwise/set_room_manual_heating",
+        "room_id": str,
+        "heating": bool,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def handle_set_room_manual_heating(hass, connection, msg):
+    """« Chauffer 1 h » / « Arrêter la chauffe » d'une pièce (spec 011,
+    contracts/websocket-api.md)."""
+    room_id = msg["room_id"]
+    if not _room_exists(hass, room_id):
+        connection.send_error(msg["id"], "room_not_found", "Pièce introuvable.")
+        return
+    regulator = get_regulator(hass)
+    try:
+        if regulator is None:
+            raise radiators_module.RFPlayerNotConfiguredError()
+        if msg["heating"]:
+            failed = await regulator.async_room_manual_heating(room_id)
+        else:
+            failed = await regulator.async_end_room_manual_heating(room_id)
+    except RoomWithoutRadiatorError:
+        connection.send_error(
+            msg["id"], "room_without_radiator", "Cette pièce n'a aucun radiateur."
+        )
+        return
+    except radiators_module.RFPlayerNotConfiguredError:
+        connection.send_error(
+            msg["id"], "rfplayer_not_configured", "Aucun port RFPlayer configuré."
+        )
+        return
+    except RFPlayerUnreachable:
+        connection.send_error(
+            msg["id"], "rfplayer_unreachable", "Le dongle RFPlayer est injoignable."
+        )
+        return
+
+    room = await rooms_module.async_get_room(hass, room_id)
+    connection.send_result(msg["id"], {"room": room, "failed_radiator_ids": failed})
 
 
 # --- Programmation (spec 005) ---
@@ -724,6 +818,8 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, handle_abandon_radiator_pairing)
     websocket_api.async_register_command(hass, handle_list_radiators)
     websocket_api.async_register_command(hass, handle_set_radiator_heating)
+    websocket_api.async_register_command(hass, handle_set_room_manual_heating)
+    websocket_api.async_register_command(hass, handle_get_info)
     websocket_api.async_register_command(hass, handle_delete_radiator)
     websocket_api.async_register_command(hass, handle_get_schedule)
     websocket_api.async_register_command(hass, handle_edit_schedule)

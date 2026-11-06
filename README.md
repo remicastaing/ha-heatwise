@@ -25,9 +25,11 @@ Les itérations suivantes ont ajouté la programmation (spec 005), les
 sondes (specs 006 et 007) puis la régulation automatique de chaque pièce
 (`specs/008-heatwise-regulation-auto/`), puis le renommage et la
 suppression d'une pièce depuis le panneau
-(`specs/009-heatwise-renommer-supprimer-piece/`), et enfin l'historique
+(`specs/009-heatwise-renommer-supprimer-piece/`), l'historique
 des températures et de l'hygrométrie
-(`specs/010-heatwise-historique-mesures/`).
+(`specs/010-heatwise-historique-mesures/`), et enfin la chauffe 1 h d'une
+pièce, l'affichage de la version et des mises à jour, et le renvoi des
+ordres toutes les 5 min (`specs/011-heatwise-panneau-maj-chauffe/`).
 
 Le protocole radio est documenté en détail dans `docs/rfplayer-x2d.md` du
 dépôt privé (essais réels sur du matériel Delta Dore / RFPlayer).
@@ -112,6 +114,15 @@ dongle ci-dessus) :
    radiateurs, chacun avec une icône indiquant s'il chauffe. Cliquer sur
    l'icône allume ou éteint manuellement ce radiateur ; une chauffe
    manuelle s'arrête automatiquement après 1 h.
+
+   **Chauffer 1 h** : le bouton « Chauffer 1 h » en pied de pavé (ou sur
+   la ligne, en affichage liste) met en chauffe tous les radiateurs de la
+   pièce et suspend sa régulation ; le pavé affiche « Chauffe manuelle
+   jusqu'à HH:MM ». Un nouvel appui relance l'heure ; « Arrêter la
+   chauffe » y met fin aussitôt. À l'échéance, les radiateurs reçoivent
+   un ordre d'arrêt et la pièce reprend son fonctionnement normal. La
+   chauffe est acceptée même si la sonde est indisponible ou en mode
+   vacances ; un redémarrage de Home Assistant l'annule.
 5. **Régulation automatique** : toute pièce qui a au moins un radiateur
    et une sonde est régulée, sans réglage à activer. Ses radiateurs
    chauffent quand la température mesurée passe sous « consigne −
@@ -122,8 +133,16 @@ dongle ci-dessus) :
    régulée ». Une action manuelle sur un radiateur suspend la régulation
    de toute la pièce pendant 1 h. Une pièce sans sonde n'est jamais
    chauffée par la régulation.
-6. Un bouton dans la barre d'outils permet de basculer l'affichage entre
-   pavés et liste ; le choix est mémorisé par navigateur.
+6. L'en-tête du panneau affiche la **version** de Heatwise et regroupe
+   les actions générales ; un bouton y bascule l'affichage entre pavés et
+   liste (choix mémorisé par navigateur).
+
+   **Mises à jour** : si Heatwise est installé via HACS et qu'une version
+   plus récente est disponible, un bandeau l'indique sous l'en-tête, avec
+   le lien vers les notes de version et un bouton « Mettre à jour »
+   (après confirmation). Une fois la version installée, le bandeau
+   propose de redémarrer Home Assistant. Sans HACS, seule la version
+   s'affiche.
 7. **Renommer une pièce** : section « Pièce » des paramètres de la pièce
    → modifier le nom → « Renommer ». La Zone Home Assistant est renommée
    (Paramètres → Zones affiche le même nom) ; radiateurs, programmation
@@ -177,9 +196,12 @@ une itération future a besoin d'automatisations ou de cartes Lovelace).
 ## Sécurité
 
 - Le récepteur X2D coupe lui-même le chauffage s'il ne reçoit plus aucun
-  ordre pendant une heure : une chauffe manuelle est donc de toute façon
-  limitée à 1 h par Heatwise (arrêt explicite envoyé, sans compter
-  uniquement sur cette sécurité matérielle).
+  ordre pendant une heure. Heatwise limite toute chauffe manuelle à 1 h
+  après la dernière action (arrêt explicite envoyé à l'échéance). Pendant
+  cette heure, l'ordre de chauffe est renvoyé toutes les 5 min pour
+  rattraper une trame perdue ; conséquence acceptée : si Heatwise cessait
+  d'émettre juste après un renvoi, la coupure matérielle n'interviendrait
+  qu'une heure plus tard (environ 2 h de chauffe au pire).
 - Au démarrage de Home Assistant, tous les radiateurs déjà enregistrés
   reçoivent un ordre d'arrêt, quel que soit leur état avant l'arrêt ; la
   régulation reprend ensuite pièce par pièce, sur des mesures valides.
@@ -187,9 +209,10 @@ une itération future a besoin d'automatisations ou de cartes Lovelace).
   radiateurs reçoivent un ordre d'arrêt.
 - Régulation : arrêt de sécurité dès que la sonde est indisponible,
   inconnue, non numérique ou muette depuis plus d'une heure ; l'ordre
-  courant (marche comme arrêt) est renvoyé au moins toutes les 15 min,
-  bien avant la coupure matérielle d'1 h, ce qui rattrape aussi les
-  trames perdues. Limite acceptée : une sonde défaillante qui envoie
+  courant de chaque radiateur (marche comme arrêt, y compris pour les
+  pièces sans sonde et les radiateurs sans pièce, qui reçoivent l'arrêt)
+  est renvoyé toutes les 5 min, bien avant la coupure matérielle d'1 h,
+  ce qui rattrape les trames perdues en moins de 6 min. Limite acceptée : une sonde défaillante qui envoie
   régulièrement une valeur trop basse ferait chauffer la pièce.
 - Si le dongle RFPlayer est injoignable, aucun radiateur n'est ajouté et
   aucun ordre de chauffe/arrêt n'est considéré comme appliqué : un

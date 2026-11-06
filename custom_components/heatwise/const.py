@@ -45,9 +45,10 @@ EVENT_REGULATION_UPDATED = "heatwise_regulation_updated"
 SIGNAL_RADIATORS_CHANGED = "heatwise_radiators_changed"
 # Réévaluation au moins chaque minute à défaut d'événement (FR-007).
 REGULATION_TICK = timedelta(seconds=60)
-# Renvoi de l'ordre courant, bien en dessous de la coupure matérielle
-# d'1 h du récepteur X2D (FR-013, research R5).
-REGULATION_RESEND = timedelta(minutes=15)
+# Renvoi de l'ordre courant de chaque radiateur, bien en dessous de la
+# coupure matérielle d'1 h du récepteur X2D, pour rattraper vite une trame
+# perdue (spec 011 FR-001 : 5 min, au lieu des 15 min de la spec 008).
+REGULATION_RESEND = timedelta(minutes=5)
 # Suspension de la régulation d'une pièce après une action manuelle
 # (FR-015, research R6).
 MANUAL_SUSPENSION = timedelta(hours=1)
