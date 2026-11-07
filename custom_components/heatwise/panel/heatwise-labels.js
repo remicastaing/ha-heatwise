@@ -67,3 +67,14 @@ export function regulationLabel(regulation, heating = false) {
       return null;
   }
 }
+
+
+// Spec 012 (FR-013b) : consigne temporaire en cours sur une pièce, ou
+// `null`. Partagé par le pavé et la ligne.
+export function temporaryTargetLabel(regulation) {
+  const temporary = regulation && regulation.temporary_target;
+  if (!temporary || regulation.target_source !== "temporary") {
+    return null;
+  }
+  return `Temporaire jusqu'à ${formatMoment(temporary.until)}`;
+}

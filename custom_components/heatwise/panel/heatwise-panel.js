@@ -1,7 +1,10 @@
 import { LitElement, html, css } from "./vendor/lit-core.min.js";
 import "./heatwise-schedule.js";
 import "./heatwise-history.js";
-import { formatMoment, regulationLabel } from "./heatwise-labels.js";
+import { formatMoment, regulationLabel, temporaryTargetLabel } from "./heatwise-labels.js";
+
+// Spec 012 : durées proposées pour une consigne temporaire (minutes).
+const TEMPORARY_DURATIONS = [30, 60, 120, 180, 360, 720, 1440];
 
 const VIEW_MODE_STORAGE_KEY = "heatwise-panel-view-mode";
 // Spec 006 : seuil d'affichage « pile faible » (research R8). La règle
@@ -101,6 +104,8 @@ class HeatwisePanel extends LitElement {
     _updateError: { state: true },
     _roomHeatingBusy: { state: true },
     _roomNotices: { state: true },
+    // Spec 012 : consigne temporaire d'une pièce (FR-013b).
+    _temporaryDialog: { state: true },
   };
 
   static styles = css`
@@ -575,6 +580,32 @@ class HeatwisePanel extends LitElement {
       --mdc-icon-size: 15px;
     }
 
+    /* Spec 012 : consigne cliquable (consigne temporaire). */
+    button.target-temperature {
+      border: none;
+      background: transparent;
+      padding: 2px 4px;
+      margin: -2px -4px;
+      border-radius: 6px;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    button.target-temperature:hover {
+      background: var(--hw-accent-soft);
+    }
+
+    .target-temperature.temporary {
+      color: var(--hw-accent);
+      font-weight: 600;
+    }
+
+    .regulation-chip.temporary {
+      color: var(--hw-accent);
+      background: var(--hw-accent-soft);
+      border-color: var(--hw-accent-border);
+    }
+
     /* Spec 011 (US2) : action de chauffe en pied de pavé. */
     .room-footer {
       display: flex;
@@ -733,7 +764,8 @@ class HeatwisePanel extends LitElement {
       overflow-y: auto;
     }
 
-    .sensor-dialog select {
+    .sensor-dialog select,
+    .dialog select.temporary-duration {
       display: block;
       width: 100%;
       box-sizing: border-box;
@@ -2186,6 +2218,7 @@ class HeatwisePanel extends LitElement {
       ${this._pairing ? this._renderPairingDialog() : ""}
       ${this._generalSettingsDialog ? this._renderGeneralSettingsDialog() : ""}
       ${this._updateDialog ? this._renderUpdateDialog() : ""}
+      ${this._temporaryDialog ? this._renderTemporaryDialog() : ""}
     `;
   }
 
@@ -3427,9 +3460,7 @@ class HeatwisePanel extends LitElement {
         ${this._renderMeasures(room)}
         ${room.has_radiator
           ? room.target_temperature != null
-            ? html`<span class="target-temperature" title="Consigne courante">
-                <ha-icon icon="mdi:target"></ha-icon>${formatTargetTemperature(room.target_temperature)}°
-              </span>`
+            ? this._renderTarget(room)
             : html`
                 <span class="target-temperature-icon">
                   <ha-icon icon="mdi:radiator"></ha-icon>
@@ -3447,6 +3478,7 @@ class HeatwisePanel extends LitElement {
         </div>
         ${this._renderSecondaryMeasures(room)}
         ${this._renderRegulation(room)}
+        ${this._renderTemporaryTarget(room)}
       </div>
     `;
   }
@@ -3463,6 +3495,171 @@ class HeatwisePanel extends LitElement {
       <span class="regulation-chip ${label.kind}" title=${label.text}>
         <ha-icon icon=${label.icon}></ha-icon>${label.text}
       </span>
+    `;
+  }
+
+  // Spec 012 (FR-013b) : la consigne d'une pièce régulée ouvre le
+  // dialogue de consigne temporaire.
+  _renderTarget(room) {
+    const temporary = !!temporaryTargetLabel(room.regulation);
+    const content = html`<ha-icon icon=${temporary ? "mdi:timer-outline" : "mdi:target"}></ha-icon
+      >${formatTargetTemperature(room.target_temperature)}°`;
+    if (!room.has_sensor) {
+      return html`<span class="target-temperature" title="Consigne courante">${content}</span>`;
+    }
+    return html`
+      <button
+        class="target-temperature ${temporary ? "temporary" : ""}"
+        title="Consigne courante — consigne temporaire…"
+        aria-label="Consigne temporaire"
+        @click=${() => this._openTemporaryDialog(room)}
+      >
+        ${content}
+      </button>
+    `;
+  }
+
+  _renderTemporaryTarget(room) {
+    const label = temporaryTargetLabel(room.regulation);
+    if (!label) {
+      return "";
+    }
+    return html`
+      <span class="regulation-chip temporary" title=${label}>
+        <ha-icon icon="mdi:timer-outline"></ha-icon>${label}
+      </span>
+    `;
+  }
+
+  _openTemporaryDialog(room) {
+    const current = room.regulation && room.regulation.temporary_target;
+    this._temporaryDialog = {
+      roomId: room.room_id,
+      temperature: String(current ? current.temperature : room.target_temperature ?? 19),
+      duration: 120,
+      error: null,
+      busy: false,
+    };
+  }
+
+  _closeTemporaryDialog() {
+    this._temporaryDialog = null;
+  }
+
+  _temporaryErrorMessage(err) {
+    return (
+      {
+        room_not_regulated: "Cette pièce n'a pas de sonde : elle ne peut pas suivre une température.",
+        room_without_radiator: "Cette pièce n'a aucun radiateur.",
+        vacation_mode_active: "Le mode vacances est actif : désactivez-le d'abord.",
+        invalid_temperature: "Température entre 7 et 25 °C, par pas de 0,5.",
+        invalid_duration: "Durée entre 30 min et 24 h.",
+      }[err && err.code] || this._pairingErrorMessage(err || {})
+    );
+  }
+
+  async _submitTemporaryDialog(clear) {
+    const dialog = this._temporaryDialog;
+    if (!dialog || dialog.busy) {
+      return;
+    }
+    this._temporaryDialog = { ...dialog, busy: true, error: null };
+    try {
+      const response = await this.hass.connection.sendMessagePromise(
+        clear
+          ? { type: "heatwise/clear_temporary_target", room_id: dialog.roomId }
+          : {
+              type: "heatwise/set_temporary_target",
+              room_id: dialog.roomId,
+              temperature: Number(dialog.temperature),
+              duration_minutes: Number(dialog.duration),
+            }
+      );
+      this._rooms = this._rooms.map((r) => (r.room_id === dialog.roomId ? response.room : r));
+      this._temporaryDialog = null;
+    } catch (err) {
+      this._temporaryDialog = { ...dialog, busy: false, error: this._temporaryErrorMessage(err) };
+    }
+  }
+
+  _renderTemporaryDialog() {
+    const dialog = this._temporaryDialog;
+    const room = this._roomById(dialog.roomId);
+    if (!room) {
+      return "";
+    }
+    const active = !!temporaryTargetLabel(room.regulation);
+    const durationLabel = (minutes) =>
+      minutes < 60 ? `${minutes} min` : `${minutes / 60} h`;
+    return html`
+      <div class="dialog-overlay">
+        <div class="dialog">
+          <div class="dialog-header">
+            <div>
+              <h2>Consigne temporaire</h2>
+              <span class="dialog-subtitle">— ${room.name}</span>
+            </div>
+            <button class="icon-button" aria-label="Fermer" @click=${this._closeTemporaryDialog}>
+              <ha-icon icon="mdi:close"></ha-icon>
+            </button>
+          </div>
+          <p class="hint">
+            ${active
+              ? temporaryTargetLabel(room.regulation)
+              : "La pièce suit cette consigne pendant la durée choisie, puis revient à sa programmation."}
+          </p>
+          <div>
+            <label for="hw-temporary-temperature">Consigne (°C)</label>
+            <input
+              id="hw-temporary-temperature"
+              type="number"
+              min="7"
+              max="25"
+              step="0.5"
+              .value=${dialog.temperature}
+              @input=${(e) =>
+                (this._temporaryDialog = { ...this._temporaryDialog, temperature: e.target.value })}
+            />
+            <label for="hw-temporary-duration">Durée</label>
+            <select
+              id="hw-temporary-duration"
+              class="temporary-duration"
+              @change=${(e) =>
+                (this._temporaryDialog = { ...this._temporaryDialog, duration: e.target.value })}
+            >
+              ${TEMPORARY_DURATIONS.map(
+                (minutes) => html`<option
+                  value=${minutes}
+                  ?selected=${Number(dialog.duration) === minutes}
+                >
+                  ${durationLabel(minutes)}
+                </option>`
+              )}
+            </select>
+            ${dialog.error ? html`<p class="dialog-error">${dialog.error}</p>` : ""}
+          </div>
+          <div class="dialog-actions">
+            ${active
+              ? html`<button
+                  class="button-secondary"
+                  ?disabled=${dialog.busy}
+                  @click=${() => this._submitTemporaryDialog(true)}
+                >
+                  Revenir au planning
+                </button>`
+              : html`<button class="button-secondary" @click=${this._closeTemporaryDialog}>
+                  Annuler
+                </button>`}
+            <button
+              class="button-primary"
+              ?disabled=${dialog.busy}
+              @click=${() => this._submitTemporaryDialog(false)}
+            >
+              Appliquer
+            </button>
+          </div>
+        </div>
+      </div>
     `;
   }
 

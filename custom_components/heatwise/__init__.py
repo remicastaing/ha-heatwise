@@ -22,7 +22,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.loader import async_get_integration
 
-from . import radiators, websocket_api
+from . import llm_api, radiators, websocket_api
 from .const import DOMAIN
 from .history_recorder import HistoryRecorder
 from .regulator import Regulator
@@ -76,6 +76,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     history = HistoryRecorder(hass)
     hass.data[DOMAIN]["history"] = history
     await history.async_start()
+
+    # Spec 012 : outils pour assistants IA, publiés par le serveur MCP de
+    # Home Assistant et sélectionnables par Assist ; retirés au
+    # déchargement de l'entrée (research R1).
+    entry.async_on_unload(llm_api.async_register(hass))
 
     return True
 

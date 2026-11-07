@@ -121,20 +121,29 @@ async def _async_assemble_areas(
     settings = all_schedules["settings"]
     now = dt_util.now()
 
+    def _effective(area_id: str) -> regulator_module.EffectiveTarget:
+        room_schedule = all_schedules["rooms"].get(area_id, schedule_module.empty_room_schedule())
+        return regulator_module.effective_target(hass, area_id, room_schedule, settings, now)
+
     def _target_temperature(area_id: str) -> float | None:
         if area_id not in room_ids_with_radiator:
             return None
-        room_schedule = all_schedules["rooms"].get(area_id, schedule_module.empty_room_schedule())
-        return schedule_module.current_target(room_schedule, settings, now)
+        # Spec 012 : consigne effective, consigne temporaire comprise.
+        return _effective(area_id).temperature
 
     regulator = regulator_module.get_regulator(hass)
 
     def _regulation(area_id: str) -> dict[str, Any] | None:
         if area_id not in room_ids_with_radiator:
             return None
-        if regulator is None:
-            return dict(regulator_module.DEFAULT_STATUS)
-        return regulator.room_status(area_id)
+        status = (
+            dict(regulator_module.DEFAULT_STATUS)
+            if regulator is None
+            else regulator.room_status(area_id)
+        )
+        # Provenance recalculée à l'instant, comme la consigne affichée.
+        status["target_source"] = _effective(area_id).source
+        return status
 
     return [
         _assemble_room(

@@ -25,7 +25,13 @@ from . import schedules_store
 from . import sensors as sensors_module
 from .const import DOMAIN, HISTORY_PERIODS
 from .history_recorder import HistoryUnavailableError, get_history_recorder
-from .regulator import RoomWithoutRadiatorError, get_regulator
+from .regulator import (
+    TEMPORARY_TARGET_ERRORS,
+    RoomWithoutRadiatorError,
+    get_regulator,
+    parse_temporary_end,
+    temporary_target_error,
+)
 from .rfplayer_client import RFPlayerClient, RFPlayerUnreachable
 from .rooms import InvalidRoomNameError
 
@@ -404,6 +410,56 @@ async def handle_set_room_manual_heating(hass, connection, msg):
 
     room = await rooms_module.async_get_room(hass, room_id)
     connection.send_result(msg["id"], {"room": room, "failed_radiator_ids": failed})
+
+
+# --- Consigne temporaire (spec 012) ---
+
+
+@websocket_api.websocket_command(
+    {
+        "type": "heatwise/set_temporary_target",
+        "room_id": str,
+        vol.Required("temperature"): vol.Coerce(float),
+        vol.Optional("duration_minutes"): int,
+        vol.Optional("until"): str,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def handle_set_temporary_target(hass, connection, msg):
+    room_id = msg["room_id"]
+    if not _room_exists(hass, room_id):
+        connection.send_error(msg["id"], "room_not_found", "Pièce introuvable.")
+        return
+    try:
+        regulator = get_regulator(hass)
+        if regulator is None:
+            raise radiators_module.RFPlayerNotConfiguredError()
+        duration, until = parse_temporary_end(msg.get("duration_minutes"), msg.get("until"))
+        await regulator.async_set_temporary_target(
+            room_id, msg["temperature"], duration=duration, until=until, origin="panel"
+        )
+    except TEMPORARY_TARGET_ERRORS as err:
+        code, message = temporary_target_error(err)
+        connection.send_error(msg["id"], code, message)
+        return
+    connection.send_result(msg["id"], {"room": await rooms_module.async_get_room(hass, room_id)})
+
+
+@websocket_api.websocket_command(
+    {"type": "heatwise/clear_temporary_target", "room_id": str}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def handle_clear_temporary_target(hass, connection, msg):
+    room_id = msg["room_id"]
+    if not _room_exists(hass, room_id):
+        connection.send_error(msg["id"], "room_not_found", "Pièce introuvable.")
+        return
+    regulator = get_regulator(hass)
+    if regulator is not None:
+        await regulator.async_clear_temporary_target(room_id)
+    connection.send_result(msg["id"], {"room": await rooms_module.async_get_room(hass, room_id)})
 
 
 # --- Programmation (spec 005) ---
@@ -822,6 +878,8 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, handle_get_info)
     websocket_api.async_register_command(hass, handle_delete_radiator)
     websocket_api.async_register_command(hass, handle_get_schedule)
+    websocket_api.async_register_command(hass, handle_set_temporary_target)
+    websocket_api.async_register_command(hass, handle_clear_temporary_target)
     websocket_api.async_register_command(hass, handle_edit_schedule)
     websocket_api.async_register_command(hass, handle_copy_days)
     websocket_api.async_register_command(hass, handle_copy_program)

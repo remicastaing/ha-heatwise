@@ -71,3 +71,15 @@ HISTORY_PERIODS = {
 HISTORY_PERIOD_STEPS = {"24h": 60, "7d": 900, "30d": 3600}
 # Statut enregistré pour une pièce sans radiateur (data-model.md).
 HISTORY_STATUS_NO_RADIATOR = "no_radiator"
+
+# --- Assistant IA / MCP (spec 012) ---
+# API LLM enregistrée auprès de Home Assistant, publiée par le serveur
+# MCP natif (`mcp_server`) et sélectionnable par Assist (research R1).
+LLM_API_ID = "heatwise"
+LLM_API_NAME = "Heatwise"
+# Bornes d'une consigne temporaire (research R10).
+TEMPORARY_TARGET_MIN = timedelta(minutes=30)
+TEMPORARY_TARGET_MAX = timedelta(hours=24)
+# Taille maximale des réponses d'historique (research R8).
+LLM_SERIES_MAX_POINTS = 100
+LLM_TARGET_CHANGES_MAX = 50

@@ -186,6 +186,73 @@ dongle ci-dessus) :
    configuration de Home Assistant, inclus dans ses sauvegardes) :
    environ 1 Mo par pièce et par an à 10 min, dix fois plus à 1 min.
 
+## Assistant IA (MCP)
+
+Heatwise fournit une API d'outils « Heatwise » pour assistants IA. Le
+serveur MCP intégré à Home Assistant la publie : un client MCP (Claude
+Code, Claude Desktop…) peut alors interroger le chauffage. Heatwise
+n'ouvre aucun port : transport et authentification sont ceux de Home
+Assistant.
+
+Prérequis : Home Assistant 2026.9 ou plus récent.
+
+1. **Paramètres → Appareils et services → Ajouter une intégration →
+   « Model Context Protocol Server »**, puis cocher l'API **Heatwise**
+   (avec ou sans « Assist »).
+2. **Profil → Sécurité → Jetons d'accès longue durée → Créer un jeton**
+   avec un compte **administrateur** : tous les outils Heatwise sont
+   réservés aux administrateurs, comme le panneau. Garder le jeton
+   hors de tout dépôt.
+3. Brancher le client :
+   - **Claude Code** :
+
+     ```bash
+     claude mcp add --transport http heatwise http://homeassistant.local:8123/api/mcp --header "Authorization: Bearer VOTRE_JETON"
+     ```
+
+     puis `claude mcp list` (statut connecté) et `/mcp` dans une session
+     pour voir les outils.
+   - **Claude Desktop** : ajouter un connecteur personnalisé d'URL
+     `http://homeassistant.local:8123/api/mcp` (authentification OAuth
+     de Home Assistant), ou passer par la passerelle `mcp-remote` avec
+     le jeton.
+4. **Assist** (facultatif) : dans les options d'un agent de
+   conversation à base de LLM, sélectionner l'API Heatwise. Seule une
+   conversation menée par un administrateur identifié (application,
+   interface web) peut l'utiliser ; un satellite vocal sans compte
+   utilisateur est refusé.
+
+Outils disponibles :
+
+| Outil | Rôle |
+|-------|------|
+| `list_rooms` | Pièces : température, humidité, consigne, chauffe, état de régulation |
+| `get_room` | Détail d'une pièce : sonde, raison de l'état, fin de chauffe manuelle, consigne temporaire, programme actif, radiateurs |
+| `get_settings` | Mode vacances, consigne hors plage, fréquence de l'historique, bornes, version |
+| `get_schedule` | Programmation d'une pièce, jour par jour (« 06:30–08:00 20.0 ») |
+| `get_history` | Historique résumé sur 24 h, 7 j ou 30 j (100 points au plus, statistiques, minutes de chauffe) |
+| `set_room_heating` | « Chauffer 1 h » / « Arrêter la chauffe » d'une pièce, comme le bouton du panneau |
+| `set_temporary_target` | Consigne temporaire d'une pièce avec sonde : 30 min à 24 h, ou jusqu'à une heure donnée |
+| `clear_temporary_target` | Retour immédiat de la pièce à sa programmation |
+| `edit_schedule` | Modification durable d'une plage horaire, pour un ou plusieurs jours (tout ou rien) |
+| `set_vacation_mode` | Activer ou désactiver le mode vacances |
+
+Les pièces se désignent par leur nom (casse et accents ignorés) ou leur
+identifiant. Les températures vont de 7 à 25 °C par pas de 0,5 ; une
+valeur hors bornes est refusée, jamais arrondie.
+
+**Consigne temporaire** : la pièce vise cette température jusqu'à
+l'échéance, puis revient seule à sa programmation (au plus une minute
+après). Elle est visible et annulable dans le panneau (clic sur la
+consigne d'une pièce). Elle cède à une chauffe 1 h en cours, est annulée
+par l'activation du mode vacances ou le retrait de la sonde, et n'est
+pas conservée au redémarrage de Home Assistant (retour au planning).
+
+Les outils ne peuvent ni créer, renommer ou supprimer une pièce, ni
+appairer un appareil, ni piloter un radiateur isolément, ni copier des
+plannings ou changer la parité des semaines. Chaque action est inscrite
+dans le journal de Home Assistant (`custom_components.heatwise.llm_api`).
+
 ## Entités exposées
 
 Aucune : les radiateurs sont pilotés uniquement depuis le panneau

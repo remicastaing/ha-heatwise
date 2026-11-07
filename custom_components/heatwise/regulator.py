@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from typing import Any
 
@@ -32,6 +32,7 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.util import dt as dt_util
 
+from . import llm_format
 from . import radiators as radiators_module
 from . import regulation
 from . import schedule as schedule_module
@@ -45,6 +46,8 @@ from .const import (
     REGULATION_RESEND,
     REGULATION_TICK,
     SIGNAL_RADIATORS_CHANGED,
+    TEMPORARY_TARGET_MAX,
+    TEMPORARY_TARGET_MIN,
 )
 from .regulation import Decision, Reason, RegulationPolicy, RoomInputs, SensorHealth
 from .rfplayer_client import RFPlayerClient, RFPlayerUnreachable
@@ -70,10 +73,139 @@ class RoomWithoutRadiatorError(Exception):
     """Chauffe 1 h demandée pour une pièce sans radiateur (spec 011)."""
 
 
+class RoomNotRegulatedError(Exception):
+    """Consigne temporaire refusée : la pièce n'a pas de sonde (spec 012)."""
+
+
+class VacationModeActiveError(Exception):
+    """Consigne temporaire refusée : le mode vacances est actif (spec 012)."""
+
+
+class InvalidDurationError(ValueError):
+    """Durée ou échéance de consigne temporaire hors bornes (spec 012)."""
+
+
+def temporary_target_error(err: Exception) -> tuple[str, str] | None:
+    """Code et message d'un refus de consigne temporaire, communs au
+    panneau et aux outils LLM (contracts/websocket-api.md, llm-tools.md)."""
+    if isinstance(err, RoomWithoutRadiatorError):
+        return "room_without_radiator", "Cette pièce n'a aucun radiateur."
+    if isinstance(err, radiators_module.RFPlayerNotConfiguredError):
+        return "rfplayer_not_configured", "Aucun dongle RFPlayer n'est configuré."
+    if isinstance(err, RoomNotRegulatedError):
+        return (
+            "room_not_regulated",
+            "Cette pièce n'a pas de sonde : elle ne peut pas suivre une température.",
+        )
+    if isinstance(err, VacationModeActiveError):
+        return (
+            "vacation_mode_active",
+            "Le mode vacances est actif : désactivez-le avant de poser une consigne temporaire.",
+        )
+    if isinstance(err, schedule_module.InvalidTemperatureError):
+        return "invalid_temperature", str(err)
+    if isinstance(err, InvalidDurationError):
+        return "invalid_duration", str(err)
+    return None
+
+
+def parse_temporary_end(
+    duration_minutes: int | None, until: str | None
+) -> tuple[timedelta | None, datetime | None]:
+    """Durée en minutes ou heure de fin « HH:MM » (prochaine occurrence
+    locale), exactement une des deux ; commun au panneau et aux outils
+    LLM. Lève `InvalidDurationError`."""
+    if (duration_minutes is None) == (until is None):
+        raise InvalidDurationError("Indiquer soit une durée, soit une heure de fin.")
+    if duration_minutes is not None:
+        return timedelta(minutes=duration_minutes), None
+    try:
+        minutes = llm_format.hhmm_to_minutes(until)
+    except ValueError as err:
+        raise InvalidDurationError(str(err)) from err
+    return None, llm_format.next_occurrence(dt_util.now(), minutes)
+
+
+TEMPORARY_TARGET_ERRORS = (
+    RoomWithoutRadiatorError,
+    radiators_module.RFPlayerNotConfiguredError,
+    RoomNotRegulatedError,
+    VacationModeActiveError,
+    schedule_module.InvalidTemperatureError,
+    InvalidDurationError,
+)
+
+
+# Provenance de la consigne effective (spec 012, data-model).
+SOURCE_SCHEDULE = "schedule"
+SOURCE_DEFAULT = "default"
+SOURCE_VACATION = "vacation"
+SOURCE_TEMPORARY = "temporary"
+
+
+@dataclass
+class TemporaryTarget:
+    """Dérogation au planning d'une pièce, en mémoire uniquement
+    (spec 012, research R10)."""
+
+    temperature: float
+    until: datetime
+    origin: str
+    set_at: datetime
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "temperature": self.temperature,
+            "until": self.until.isoformat(),
+            "origin": self.origin,
+        }
+
+
+@dataclass(frozen=True)
+class EffectiveTarget:
+    """Consigne visée par la régulation et affichée (research R11)."""
+
+    temperature: float
+    source: str
+    until: datetime | None = None
+
+
+def schedule_target(
+    room_schedule: dict[str, Any], settings: dict[str, Any], now: datetime
+) -> EffectiveTarget:
+    """Consigne issue de la programmation seule, avec sa provenance."""
+    temperature = schedule_module.current_target(room_schedule, settings, now)
+    program, _ = schedule_module.active_program(room_schedule, settings["vacation_mode"], now)
+    if program == "vacation":
+        return EffectiveTarget(temperature, SOURCE_VACATION)
+    minute = now.hour * 60 + now.minute
+    day = schedule_module.get_week(room_schedule, program)[now.weekday()]
+    in_slot = any(slot["start"] <= minute < slot["end"] for slot in day)
+    return EffectiveTarget(temperature, SOURCE_SCHEDULE if in_slot else SOURCE_DEFAULT)
+
+
+def effective_target(
+    hass: HomeAssistant,
+    room_id: str,
+    room_schedule: dict[str, Any],
+    settings: dict[str, Any],
+    now: datetime,
+) -> EffectiveTarget:
+    """Consigne effective d'une pièce, régulateur présent ou non ; seul
+    point de calcul pour la régulation, les pièces et l'historique."""
+    regulator = get_regulator(hass)
+    if regulator is None:
+        return schedule_target(room_schedule, settings, now)
+    return regulator.effective_target(room_id, room_schedule, settings, now)
+
+
 DEFAULT_STATUS: dict[str, Any] = {
     "status": STATUS_IDLE,
     "reason": Reason.HYSTERESIS_HOLD.value,
     "suspended_until": None,
+    # Spec 012 : provenance de la consigne et consigne temporaire.
+    "target_source": None,
+    "temporary_target": None,
 }
 
 
@@ -86,16 +218,21 @@ class RoomRegulation:
     reason: str | None = None
     suspended_until: datetime | None = None
     last_sent: dict[str, datetime] = field(default_factory=dict)
+    temporary_target: TemporaryTarget | None = None
+    target_source: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
+        temporary = self.temporary_target.as_dict() if self.temporary_target else None
         if self.status is None:
-            return dict(DEFAULT_STATUS)
+            return {**DEFAULT_STATUS, "temporary_target": temporary}
         return {
             "status": self.status,
             "reason": self.reason,
             "suspended_until": (
                 self.suspended_until.isoformat() if self.suspended_until else None
             ),
+            "target_source": self.target_source,
+            "temporary_target": temporary,
         }
 
 
@@ -160,6 +297,9 @@ class Regulator:
         await self.async_evaluate()
 
     async def async_stop(self) -> None:
+        # Spec 012 : les consignes temporaires ne survivent pas à l'arrêt.
+        for state in self._rooms.values():
+            state.temporary_target = None
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
@@ -290,6 +430,92 @@ class Regulator:
             await self._async_evaluate_locked([room_id])
         self._fire([room_id])
         return failed
+
+    # --- Consigne temporaire (spec 012, research R10-R12) ---
+
+    def effective_target(
+        self,
+        room_id: str,
+        room_schedule: dict[str, Any],
+        settings: dict[str, Any],
+        now: datetime,
+    ) -> EffectiveTarget:
+        """Consigne temporaire si elle est active, non expirée et que le
+        mode vacances est inactif ; sinon la programmation."""
+        state = self._rooms.get(room_id)
+        temporary = state.temporary_target if state is not None else None
+        if (
+            temporary is not None
+            and not settings["vacation_mode"]
+            and now < temporary.until
+        ):
+            return EffectiveTarget(temporary.temperature, SOURCE_TEMPORARY, temporary.until)
+        return schedule_target(room_schedule, settings, now)
+
+    async def async_set_temporary_target(
+        self,
+        room_id: str,
+        temperature: float,
+        *,
+        duration: timedelta | None = None,
+        until: datetime | None = None,
+        origin: str,
+    ) -> tuple[TemporaryTarget, bool]:
+        """Pose (ou remplace) la consigne temporaire d'une pièce régulée,
+        pour `duration` ou jusqu'à `until` (exactement un des deux), puis
+        réévalue la pièce. Renvoie la dérogation et si elle en remplaçait
+        une. Lève `RoomWithoutRadiatorError`,
+        `radiators.RFPlayerNotConfiguredError`, `RoomNotRegulatedError`,
+        `VacationModeActiveError`, `schedule.InvalidTemperatureError` ou
+        `InvalidDurationError` sans rien modifier (data-model)."""
+        now = dt_util.now()
+        if (duration is None) == (until is None):
+            raise InvalidDurationError("Indiquer soit une durée, soit une heure de fin.")
+        end = now + duration if duration is not None else until
+        assert end is not None
+        if not TEMPORARY_TARGET_MIN <= end - now <= TEMPORARY_TARGET_MAX:
+            raise InvalidDurationError(
+                "La consigne temporaire doit durer entre 30 min et 24 h."
+            )
+        async with self._lock:
+            await self._room_radiators_or_raise(room_id)
+            area = ar.async_get(self.hass).async_get_area(room_id)
+            if area is None or area.temperature_entity_id is None:
+                raise RoomNotRegulatedError(room_id)
+            settings = await schedules_store.async_get_settings(self.hass)
+            if settings["vacation_mode"]:
+                raise VacationModeActiveError(room_id)
+            schedule_module.validate_temperature(temperature)
+            state = self._rooms.setdefault(room_id, RoomRegulation())
+            replaced = state.temporary_target is not None
+            state.temporary_target = TemporaryTarget(
+                temperature=temperature,
+                until=dt_util.as_utc(end),
+                origin=origin,
+                set_at=dt_util.utcnow(),
+            )
+            target = state.temporary_target
+            await self._async_evaluate_locked([room_id])
+        self._fire([room_id])
+        return target, replaced
+
+    def temporary_target_rooms(self) -> list[str]:
+        """Pièces ayant une consigne temporaire en cours."""
+        return [
+            room_id for room_id, state in self._rooms.items() if state.temporary_target
+        ]
+
+    async def async_clear_temporary_target(self, room_id: str) -> bool:
+        """Annule la consigne temporaire d'une pièce ; `False` s'il n'y
+        en avait pas (aucune erreur)."""
+        async with self._lock:
+            state = self._rooms.get(room_id)
+            if state is None or state.temporary_target is None:
+                return False
+            state.temporary_target = None
+            await self._async_evaluate_locked([room_id])
+        self._fire([room_id])
+        return True
 
     async def _room_radiators_or_raise(self, room_id: str) -> list[dict[str, Any]]:
         room_radiators = await radiators_module.async_list_radiators(self.hass, room_id)
@@ -489,6 +715,23 @@ class Regulator:
     ) -> bool:
         state = self._rooms.setdefault(room_id, RoomRegulation())
         before = self._snapshot(state, room_radiators)
+        settings = all_schedules["settings"]
+        room_schedule = all_schedules["rooms"].get(
+            room_id, schedule_module.empty_room_schedule()
+        )
+
+        # Spec 012 (FR-013a) : une consigne temporaire expirée, rendue
+        # caduque par le mode vacances ou par le retrait de la sonde est
+        # annulée ; la pièce revient à sa programmation.
+        temporary = state.temporary_target
+        if temporary is not None and (
+            now >= temporary.until
+            or settings["vacation_mode"]
+            or area.temperature_entity_id is None
+        ):
+            state.temporary_target = None
+        target = self.effective_target(room_id, room_schedule, settings, now)
+        state.target_source = target.source
 
         if state.suspended_until is not None:
             if now < state.suspended_until:
@@ -516,16 +759,11 @@ class Regulator:
             state.reason = REASON_RFPLAYER_NOT_CONFIGURED
             return self._snapshot(state, room_radiators) != before
 
-        room_schedule = all_schedules["rooms"].get(
-            room_id, schedule_module.empty_room_schedule()
-        )
         health, measured = sensor_reading(self.hass, area.temperature_entity_id, now)
         inputs = RoomInputs(
             now=now,
             room_id=room_id,
-            target=schedule_module.current_target(
-                room_schedule, all_schedules["settings"], now
-            ),
+            target=target.temperature,
             measured=measured,
             sensor=health,
             previous=state.decision,
@@ -658,6 +896,8 @@ class Regulator:
             state.status,
             state.reason,
             state.suspended_until,
+            state.temporary_target,
+            state.target_source,
             tuple(sorted((r["radiator_id"], r["heating"]) for r in room_radiators)),
         )
 

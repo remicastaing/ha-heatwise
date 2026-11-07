@@ -50,7 +50,12 @@ from .history import (
 )
 from .history_store import HistoryStore
 from .regulation import SensorHealth
-from .regulator import STATUS_NOT_REGULATED, get_regulator, sensor_reading
+from .regulator import (
+    STATUS_NOT_REGULATED,
+    effective_target,
+    get_regulator,
+    sensor_reading,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -260,11 +265,14 @@ class HistoryRecorder:
         for area in ar.async_get(hass).async_list_areas():
             if room_ids is not None and area.id not in room_ids:
                 continue
-            target = schedule_module.current_target(
+            # Spec 012 : consigne effective (consigne temporaire comprise).
+            target = effective_target(
+                hass,
+                area.id,
                 all_schedules["rooms"].get(area.id, schedule_module.empty_room_schedule()),
                 all_schedules["settings"],
                 now_local,
-            )
+            ).temperature
             if area.id not in heating:
                 status, reason = HISTORY_STATUS_NO_RADIATOR, None
             elif regulator is not None:
