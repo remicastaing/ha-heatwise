@@ -67,6 +67,31 @@ const PANEL_VERSION = (() => {
 })();
 const RELOAD_GUARD_KEY = "heatwise.reloadedForVersion";
 
+// Actualisation des informations HACS du dépôt Heatwise : automatique à
+// l'ouverture du panneau au plus une fois par heure, ou à la demande.
+const HACS_REFRESH_KEY = "heatwise.hacsRefreshedAt";
+const HACS_REFRESH_EVERY_MS = 60 * 60 * 1000;
+// Code d'erreur de home-assistant-js-websocket quand la connexion tombe
+// (attendu pendant un redémarrage de Home Assistant).
+const ERR_CONNECTION_LOST = 3;
+
+function hacsRefreshDue() {
+  try {
+    const last = Number(window.localStorage.getItem(HACS_REFRESH_KEY) || 0);
+    return Date.now() - last >= HACS_REFRESH_EVERY_MS;
+  } catch (err) {
+    return true;
+  }
+}
+
+function markHacsRefreshed() {
+  try {
+    window.localStorage.setItem(HACS_REFRESH_KEY, String(Date.now()));
+  } catch (err) {
+    // Sans stockage, l'actualisation se refera à la prochaine ouverture.
+  }
+}
+
 function reloadForVersion(serverVersion) {
   try {
     if (window.sessionStorage.getItem(RELOAD_GUARD_KEY) === serverVersion) {
@@ -131,6 +156,8 @@ class HeatwisePanel extends LitElement {
     _info: { state: true },
     _updateDialog: { state: true },
     _updateError: { state: true },
+    _updateNotice: { state: true },
+    _checkingUpdate: { state: true },
     _roomHeatingBusy: { state: true },
     _roomNotices: { state: true },
     // Spec 012 : consigne temporaire d'une pièce (FR-013b).
@@ -205,11 +232,18 @@ class HeatwisePanel extends LitElement {
 
     .version-chip {
       padding: 2px 8px;
+      border: none;
       border-radius: 999px;
       background: var(--hw-accent-soft);
       color: var(--hw-accent);
+      font: inherit;
       font-size: 12px;
       font-weight: 600;
+      cursor: pointer;
+    }
+
+    .version-chip:disabled {
+      cursor: progress;
     }
 
     .update-banner {
@@ -1161,6 +1195,8 @@ class HeatwisePanel extends LitElement {
     this._info = null;
     this._updateDialog = null;
     this._updateError = null;
+    this._updateNotice = null;
+    this._checkingUpdate = false;
     this._roomHeatingBusy = {};
     this._roomNotices = {};
   }
@@ -1452,7 +1488,50 @@ class HeatwisePanel extends LitElement {
     }
     const serverVersion = this._info.version ? String(this._info.version) : null;
     if (PANEL_VERSION && serverVersion && PANEL_VERSION !== serverVersion) {
-      reloadForVersion(serverVersion);
+      if (reloadForVersion(serverVersion)) {
+        return;
+      }
+    }
+    this._checkForUpdate(false);
+  }
+
+  // Demande à HACS de relire le dépôt Heatwise sur GitHub (ce que fait
+  // « Actualiser les informations » dans HACS) : l'entité de mise à jour
+  // annonce alors la dernière version. Commande interne à HACS, non
+  // documentée : en cas d'échec, la vérification manuelle le signale.
+  async _checkForUpdate(manual) {
+    const repository = this._info && this._info.hacs_repository_id;
+    if (!repository) {
+      if (manual) {
+        this._updateNotice = "HACS n'est pas installé : vérification impossible.";
+      }
+      return;
+    }
+    if (this._checkingUpdate || (!manual && !hacsRefreshDue())) {
+      return;
+    }
+    this._checkingUpdate = true;
+    this._updateNotice = null;
+    try {
+      await this.hass.connection.sendMessagePromise({
+        type: "hacs/repository/refresh",
+        repository,
+      });
+      markHacsRefreshed();
+      if (manual) {
+        // Laisser l'entité de mise à jour publier son nouvel état.
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const status = this._updateStatus();
+        if (status && status.kind === "none") {
+          this._updateNotice = `Heatwise est à jour (v${status.version}).`;
+        }
+      }
+    } catch (err) {
+      if (manual) {
+        this._updateNotice = "Vérification impossible : HACS n'a pas répondu.";
+      }
+    } finally {
+      this._checkingUpdate = false;
     }
   }
 
@@ -1508,18 +1587,28 @@ class HeatwisePanel extends LitElement {
     const { step, status } = this._updateDialog;
     this._updateDialog = null;
     this._updateError = null;
-    try {
-      if (step === "install") {
-        // L'avancement se lit ensuite sur l'entité (`in_progress`).
+    this._updateNotice = null;
+    if (step === "install") {
+      // L'avancement se lit sur l'entité (`in_progress`) ; l'appel rend la
+      // main une fois l'installation terminée.
+      try {
         await this.hass.callService("update", "install", { entity_id: status.entityId });
-      } else {
-        await this.hass.callService("homeassistant", "restart", {});
+      } catch (err) {
+        this._updateError = `La mise à jour a échoué${err && err.message ? ` : ${err.message}` : ""}.`;
+        return;
       }
+    }
+    // Redémarrage enchaîné ; la page se recharge ensuite d'elle-même
+    // quand le serveur annonce la nouvelle version (`_loadInfo`).
+    try {
+      await this.hass.callService("homeassistant", "restart", {});
     } catch (err) {
-      this._updateError =
-        step === "install"
-          ? `La mise à jour a échoué${err && err.message ? ` : ${err.message}` : ""}.`
-          : "Le redémarrage de Home Assistant n'a pas pu être lancé.";
+      if (!err || err.code !== ERR_CONNECTION_LOST) {
+        this._updateError =
+          step === "install"
+            ? "Mise à jour installée, mais Home Assistant n'a pas pu être redémarré : redémarrez-le pour l'appliquer."
+            : "Le redémarrage de Home Assistant n'a pas pu être lancé.";
+      }
     }
   }
 
@@ -2262,9 +2351,15 @@ class HeatwisePanel extends LitElement {
             <ha-icon icon="mdi:radiator"></ha-icon>
             <h1>Heatwise</h1>
             ${this._info && this._info.version
-              ? html`<span class="version-chip" title="Version installée">
-                  v${normalizeVersion(this._info.version)}
-                </span>`
+              ? html`<button
+                  class="version-chip"
+                  title="Version installée — vérifier les mises à jour"
+                  aria-label="Version ${normalizeVersion(this._info.version)}, vérifier les mises à jour"
+                  ?disabled=${this._checkingUpdate}
+                  @click=${() => this._checkForUpdate(true)}
+                >
+                  v${normalizeVersion(this._info.version)}${this._checkingUpdate ? " …" : ""}
+                </button>`
               : ""}
           </div>
           <div class="header-actions">
@@ -2367,6 +2462,17 @@ class HeatwisePanel extends LitElement {
       `;
     }
     const status = this._updateStatus();
+    if (this._updateNotice && (!status || status.kind === "none")) {
+      return html`
+        <div class="update-banner" role="status">
+          <ha-icon icon="mdi:information-outline"></ha-icon>
+          <span class="grow">${this._updateNotice}</span>
+          <button class="icon-button" aria-label="Fermer" @click=${() => (this._updateNotice = null)}>
+            <ha-icon icon="mdi:close"></ha-icon>
+          </button>
+        </div>
+      `;
+    }
     if (!status) {
       return "";
     }
@@ -2426,8 +2532,9 @@ class HeatwisePanel extends LitElement {
           <p class="hint">
             ${install
               ? html`Heatwise ${status.version} sera remplacé par la version
-                  ${status.latest} via HACS. Un redémarrage de Home Assistant sera
-                  ensuite nécessaire.`
+                  ${status.latest} via HACS, puis Home Assistant redémarrera
+                  automatiquement : tous les radiateurs repartiront à l'arrêt
+                  puis la régulation reprendra. La page se rechargera d'elle-même.`
               : html`Home Assistant va redémarrer pour appliquer la nouvelle
                   version de Heatwise. Tous les radiateurs repartiront à l'arrêt
                   puis la régulation reprendra.`}
@@ -2435,7 +2542,7 @@ class HeatwisePanel extends LitElement {
           <div class="dialog-actions">
             <button class="button-secondary" @click=${this._closeUpdateDialog}>Annuler</button>
             <button class="button-primary" @click=${this._confirmUpdateDialog}>
-              ${install ? "Mettre à jour" : "Redémarrer"}
+              ${install ? "Mettre à jour et redémarrer" : "Redémarrer"}
             </button>
           </div>
         </div>

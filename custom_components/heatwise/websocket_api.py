@@ -326,10 +326,11 @@ async def handle_set_radiator_heating(hass, connection, msg):
 
 def _find_hacs_update_entity(
     hass: HomeAssistant, documentation: str | None, name: str
-) -> str | None:
+) -> er.RegistryEntry | None:
     """Entité `update` que HACS crée pour Heatwise (spec 011, research
     R6) : retrouvée par l'URL de dépôt de son appareil (= `documentation`
-    du manifeste), à défaut par son titre. `None` sans HACS."""
+    du manifeste), à défaut par son titre. `None` sans HACS. Son
+    `unique_id` est l'identifiant HACS du dépôt."""
     device_registry = dr.async_get(hass)
     candidates = [
         entry
@@ -341,11 +342,11 @@ def _find_hacs_update_entity(
         device = device_registry.async_get(entry.device_id) if entry.device_id else None
         url = (device.configuration_url or "") if device else ""
         if wanted and url.rstrip("/").lower() == wanted:
-            return entry.entity_id
+            return entry
     for entry in candidates:
         state = hass.states.get(entry.entity_id)
         if state is not None and state.attributes.get("title") == name:
-            return entry.entity_id
+            return entry
     return None
 
 
@@ -358,13 +359,15 @@ async def handle_get_info(hass, connection, msg):
     démarrage : elle diffère de `installed_version` de l'entité HACS
     tant que Home Assistant n'a pas redémarré après une mise à jour."""
     integration = await async_get_integration(hass, DOMAIN)
+    entry = _find_hacs_update_entity(hass, integration.documentation, integration.name)
     connection.send_result(
         msg["id"],
         {
             "version": str(integration.version) if integration.version else None,
-            "update_entity_id": _find_hacs_update_entity(
-                hass, integration.documentation, integration.name
-            ),
+            "update_entity_id": entry.entity_id if entry else None,
+            # Identifiant HACS du dépôt : le panneau demande à HACS de
+            # rafraîchir ses informations (`hacs/repository/refresh`).
+            "hacs_repository_id": entry.unique_id if entry else None,
         },
     )
 

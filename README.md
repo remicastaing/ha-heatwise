@@ -140,12 +140,17 @@ dongle ci-dessus) :
    les actions générales ; un bouton y bascule l'affichage entre pavés et
    liste (choix mémorisé par navigateur).
 
-   **Mises à jour** : si Heatwise est installé via HACS et qu'une version
-   plus récente est disponible, un bandeau l'indique sous l'en-tête, avec
-   le lien vers les notes de version et un bouton « Mettre à jour »
-   (après confirmation). Une fois la version installée, le bandeau
-   propose de redémarrer Home Assistant. Sans HACS, seule la version
-   s'affiche.
+   **Mises à jour** : si Heatwise est installé via HACS, le panneau
+   demande à HACS de vérifier le dépôt à son ouverture (au plus une fois
+   par heure) ; cliquer sur la version dans l'en-tête force la
+   vérification. Quand une version plus récente existe, un bandeau
+   l'indique, avec le lien vers les notes de version et un bouton
+   « Mettre à jour » : après confirmation, la version est installée puis
+   Home Assistant redémarre automatiquement, et la page se recharge
+   d'elle-même avec le nouveau panneau. Sans HACS, seule la version
+   s'affiche. La vérification utilise une commande interne de HACS
+   (`hacs/repository/refresh`) : si elle venait à changer, « Actualiser
+   les informations » dans HACS reste possible.
 7. **Renommer une pièce** : section « Pièce » des paramètres de la pièce
    → modifier le nom → « Renommer ». La Zone Home Assistant est renommée
    (Paramètres → Zones affiche le même nom) ; radiateurs, programmation
