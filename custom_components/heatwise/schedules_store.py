@@ -16,6 +16,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from . import schedule as schedule_module
+from . import sensors as sensors_module
 from .const import (
     DOMAIN,
     EVENT_SCHEDULE_UPDATED,
@@ -39,6 +40,8 @@ def _default_settings() -> dict[str, Any]:
         "default_temperature": schedule_module.DEFAULT_TEMPERATURE,
         "vacation_mode": False,
         "history_interval": HISTORY_INTERVAL_DEFAULT,
+        # Spec 013 : source de température extérieure (enregistrement seul).
+        "outdoor_entity_id": None,
     }
 
 
@@ -56,6 +59,20 @@ def validate_history_interval(value: Any) -> None:
         raise InvalidHistoryIntervalError(
             "La fréquence doit être un nombre entier de minutes entre "
             f"{HISTORY_INTERVAL_MIN} et {HISTORY_INTERVAL_MAX}."
+        )
+
+
+class InvalidOutdoorSourceError(ValueError):
+    """Source extérieure inexistante ou d'un type non accepté (spec 013,
+    research R4)."""
+
+
+def validate_outdoor_source(hass: HomeAssistant, entity_id: Any) -> None:
+    if not isinstance(entity_id, str) or not sensors_module.is_outdoor_source(
+        hass.states.get(entity_id)
+    ):
+        raise InvalidOutdoorSourceError(
+            "Choisissez un capteur de température ou une entité météo existante."
         )
 
 
@@ -175,12 +192,21 @@ async def async_update_settings(hass: HomeAssistant, **changes: Any) -> dict[str
         schedule_module.validate_temperature(changes["default_temperature"])
     if "history_interval" in changes and changes["history_interval"] is not None:
         validate_history_interval(changes["history_interval"])
+    # Spec 013 : `""` efface la source (stockée `None`), contrairement aux
+    # autres champs où `None` signifie « non modifié ».
+    clear_outdoor = changes.get("outdoor_entity_id") == ""
+    if clear_outdoor:
+        del changes["outdoor_entity_id"]
+    elif changes.get("outdoor_entity_id") is not None:
+        validate_outdoor_source(hass, changes["outdoor_entity_id"])
 
     async with _lock(hass):
         data = await _async_load(hass)
         for key, value in changes.items():
             if value is not None:
                 data["settings"][key] = value
+        if clear_outdoor:
+            data["settings"]["outdoor_entity_id"] = None
         await _store(hass).async_save(data)
         settings = dict(data["settings"])
 

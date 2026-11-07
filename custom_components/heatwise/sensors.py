@@ -20,6 +20,11 @@ from homeassistant.core import HomeAssistant, State, callback
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
+from homeassistant.util.unit_conversion import TemperatureConverter
+
+from .const import OUTDOOR_DEVICE_CLASS
+from .regulation import SensorHealth
 
 KIND_TEMPERATURE = "temperature"
 KIND_HUMIDITY = "humidity"
@@ -237,4 +242,88 @@ def async_clear_room_sensor(hass: HomeAssistant, room_id: str) -> None:
         raise RoomNotFoundError(room_id)
     area_registry.async_update(
         room_id, temperature_entity_id=None, humidity_entity_id=None
+    )
+
+
+# --- Source de température extérieure (spec 013, research R2, R4) ---
+
+_WEATHER = "weather"
+
+
+def is_outdoor_source(state: State | None) -> bool:
+    """Vrai pour une entité météo ou un capteur de température."""
+    if state is None:
+        return False
+    if state.domain == _WEATHER:
+        return True
+    return (
+        state.domain == "sensor"
+        and state.attributes.get("device_class") == OUTDOOR_DEVICE_CLASS
+    )
+
+
+def _outdoor_value(state: State) -> tuple[Any, str | None]:
+    """Valeur brute et unité : température courante d'une entité météo
+    (jamais la prévision), état d'un capteur."""
+    if state.domain == _WEATHER:
+        return state.attributes.get("temperature"), state.attributes.get("temperature_unit")
+    return state.state, state.attributes.get("unit_of_measurement")
+
+
+def _to_celsius(value: float, unit: str | None) -> float:
+    if unit is None or unit == "°C":
+        return value
+    try:
+        return TemperatureConverter.convert(value, unit, "°C")
+    except Exception:  # noqa: BLE001 — unité inconnue : valeur supposée en °C
+        return value
+
+
+def outdoor_reading(
+    hass: HomeAssistant, entity_id: str | None, now: datetime
+) -> tuple[SensorHealth, float | None]:
+    """Classe la source extérieure avec les règles des sondes des pièces
+    (péremption 1 h comprise) ; valeur en °C. Jamais lue par la
+    régulation (FR-007)."""
+    if entity_id is None:
+        return SensorHealth.NONE, None
+    state = hass.states.get(entity_id)
+    if state is None:
+        return SensorHealth.MISSING, None
+    if state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        return SensorHealth.UNAVAILABLE, None
+    raw, unit = _outdoor_value(state)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return SensorHealth.INVALID, None
+    if is_stale(state, now):
+        return SensorHealth.STALE, None
+    return SensorHealth.OK, _to_celsius(value, unit)
+
+
+@callback
+def list_outdoor_sources(hass: HomeAssistant) -> list[dict[str, Any]]:
+    """Sources extérieures proposables : capteurs de température puis
+    entités météo, chacun trié par nom (contracts/websocket-api.md)."""
+    used = _rooms_using(hass, KIND_TEMPERATURE)
+    now = dt_util.utcnow()
+    sources = []
+    for state in hass.states.async_all(("sensor", _WEATHER)):
+        if not is_outdoor_source(state):
+            continue
+        health, value = outdoor_reading(hass, state.entity_id, now)
+        room = used.get(state.entity_id)
+        sources.append(
+            {
+                "entity_id": state.entity_id,
+                "name": state.name,
+                "kind": "weather" if state.domain == _WEATHER else "sensor",
+                "temperature": value if health is SensorHealth.OK else None,
+                "room_id": room.id if room is not None else None,
+            }
+        )
+    return sorted(
+        sources,
+        key=lambda s: (s["kind"] == "weather", s["name"].casefold(), s["entity_id"]),
     )

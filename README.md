@@ -29,7 +29,10 @@ suppression d'une pièce depuis le panneau
 des températures et de l'hygrométrie
 (`specs/010-heatwise-historique-mesures/`), et enfin la chauffe 1 h d'une
 pièce, l'affichage de la version et des mises à jour, et le renvoi des
-ordres toutes les 5 min (`specs/011-heatwise-panneau-maj-chauffe/`).
+ordres toutes les 5 min (`specs/011-heatwise-panneau-maj-chauffe/`),
+l'assistant IA via MCP (`specs/012-heatwise-mcp-llm-api/`) et la
+température extérieure avec l'historique de toute la maison
+(`specs/013-heatwise-banc-thermique/`).
 
 Le protocole radio est documenté en détail dans `docs/rfplayer-x2d.md` du
 dépôt privé (essais réels sur du matériel Delta Dore / RFPlayer).
@@ -185,6 +188,17 @@ dongle ci-dessus) :
    conservé sans limite de durée dans `heatwise_history.db` (dossier de
    configuration de Home Assistant, inclus dans ses sauvegardes) :
    environ 1 Mo par pièce et par an à 10 min, dix fois plus à 1 min.
+10. **Température extérieure** : dans les paramètres Heatwise (icône ⚙),
+   choisir un capteur de température ou une entité météo. Sa valeur
+   actuelle s'affiche dans la barre d'outils et elle est enregistrée dans
+   l'historique avec les mêmes règles que les sondes des pièces (pour une
+   entité météo : la température actuelle, jamais la prévision). Elle
+   n'a **aucun effet sur la régulation** : elle sert à l'analyse.
+   L'historique de chaque pièce affiche la courbe extérieure, masquable.
+11. **Historique de toute la maison** : bouton « Historique » de la barre
+   d'outils. Une courbe de température par pièce et l'extérieur sur un
+   même graphique (24 h, 7 jours, 30 jours) ; chaque courbe se masque
+   depuis la légende.
 
 ## Assistant IA (MCP)
 

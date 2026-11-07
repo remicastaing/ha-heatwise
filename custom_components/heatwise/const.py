@@ -71,6 +71,10 @@ HISTORY_PERIODS = {
 HISTORY_PERIOD_STEPS = {"24h": 60, "7d": 900, "30d": 3600}
 # Statut enregistré pour une pièce sans radiateur (data-model.md).
 HISTORY_STATUS_NO_RADIATOR = "no_radiator"
+# Source de température extérieure (spec 013, research R4) : capteur de
+# température ou entité météo.
+OUTDOOR_DOMAINS = ("sensor", "weather")
+OUTDOOR_DEVICE_CLASS = "temperature"
 
 # --- Assistant IA / MCP (spec 012) ---
 # API LLM enregistrée auprès de Home Assistant, publiée par le serveur

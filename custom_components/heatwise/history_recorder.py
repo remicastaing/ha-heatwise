@@ -30,6 +30,7 @@ from homeassistant.util import dt as dt_util
 from . import radiators as radiators_module
 from . import schedule as schedule_module
 from . import schedules_store
+from . import sensors as sensors_module
 from .const import (
     DOMAIN,
     EVENT_REGULATION_UPDATED,
@@ -88,6 +89,9 @@ class HistoryRecorder:
         self._samplers: dict[str, Sampler] = {}
         self._last_states: dict[int, RegulationState] = {}
         self._interval = 0
+        # Spec 013 : source et échantillonneur de la température extérieure.
+        self._outdoor_entity_id: str | None = None
+        self._outdoor_sampler: Sampler | None = None
         self._last_tick: int | None = None
         self._lock = asyncio.Lock()
         self._unsubs: list[Any] = []
@@ -105,7 +109,9 @@ class HistoryRecorder:
             _LOGGER.exception("Base d'historique Heatwise inutilisable ; historique désactivé")
             self._store = None
             return
-        self._interval = (await schedules_store.async_get_settings(hass))["history_interval"]
+        settings = await schedules_store.async_get_settings(hass)
+        self._interval = settings["history_interval"]
+        self._outdoor_entity_id = settings["outdoor_entity_id"]
         await self._async_reconcile()
         self._unsubs = [
             async_track_utc_time_change(hass, self._async_on_minute, second=0),
@@ -194,8 +200,41 @@ class HistoryRecorder:
                     or area.humidity_entity_id is not None
                 ),
             )
+        outdoor = self._sample_outdoor(ts, now)
         self._last_tick = ts
         await self._async_write_points(points, ts)
+        await self._async_write_outdoor(outdoor)
+
+    def _sample_outdoor(self, ts: int, now: datetime) -> MeasurementPoint | None:
+        """Échantillon extérieur de la minute ; renvoie le point clos à une
+        borne (spec 013, research R3)."""
+        point = None
+        sampler = self._outdoor_sampler
+        if sampler is not None and is_boundary(ts, self._interval) and ts > sampler.start:
+            point = sampler.close(ts)
+            sampler = None
+        if sampler is None:
+            sampler = self._outdoor_sampler = Sampler(ts)
+        health, value = sensors_module.outdoor_reading(self.hass, self._outdoor_entity_id, now)
+        sampler.add(
+            value if health is SensorHealth.OK else None,
+            None,
+            has_sensor=self._outdoor_entity_id is not None,
+        )
+        return point
+
+    def _close_outdoor(self, end: int) -> MeasurementPoint | None:
+        sampler = self._outdoor_sampler
+        self._outdoor_sampler = Sampler(end)
+        return sampler.close(end) if sampler is not None else None
+
+    async def _async_write_outdoor(self, point: MeasurementPoint | None) -> None:
+        if point is None or self._store is None:
+            return
+        try:
+            await self.hass.async_add_executor_job(self._store.write_outdoor, point)
+        except Exception:  # noqa: BLE001 — FR-008
+            _LOGGER.exception("Écriture de la température extérieure impossible")
 
     def _read(self, entity_id: str | None, now: datetime) -> float | None:
         health, value = sensor_reading(self.hass, entity_id, now)
@@ -214,15 +253,27 @@ class HistoryRecorder:
             if point is not None and room_id in areas:
                 points.append((room_id, _created(areas[room_id]), point))
         self._samplers = {room_id: Sampler(end) for room_id in self._samplers}
+        outdoor = self._close_outdoor(end)
         await self._async_write_points(points, end)
+        await self._async_write_outdoor(outdoor)
 
     async def _async_reload_interval(self) -> None:
-        interval = (await schedules_store.async_get_settings(self.hass))["history_interval"]
+        settings = await schedules_store.async_get_settings(self.hass)
+        interval = settings["history_interval"]
+        outdoor_entity_id = settings["outdoor_entity_id"]
         async with self._lock:
-            if interval == self._interval or self._store is None:
+            if self._store is None:
                 return
-            self._interval = interval
-            await self._async_close_samplers()
+            if interval != self._interval:
+                self._interval = interval
+                self._outdoor_entity_id = outdoor_entity_id
+                await self._async_close_samplers()
+            elif outdoor_entity_id != self._outdoor_entity_id:
+                # Spec 013 (research R3) : un point ne mélange jamais deux
+                # sources ; seules les pièces gardent leur intervalle.
+                self._outdoor_entity_id = outdoor_entity_id
+                if self._last_tick is not None:
+                    await self._async_write_outdoor(self._close_outdoor(self._last_tick + 60))
 
     async def _async_write_points(
         self, points: list[tuple[str, str, MeasurementPoint]], now: int
@@ -334,12 +385,14 @@ class HistoryRecorder:
         now = int(dt_util.utcnow().timestamp())
         pending = self._pending_point(area.id)
 
-        def _read() -> tuple[int, int, int, dict, list]:
+        pending_outdoor = self._pending_outdoor()
+
+        def _read() -> tuple[int, int, int, dict, list, dict]:
             series = store.find_active_series(area.id, _created(area))
             if series is None:
                 bucket = bucket_seconds(step, None)
                 start, end = grid_bounds(now, period_seconds, bucket)
-                return bucket, start, end, {}, []
+                return bucket, start, end, {}, [], store.read_outdoor(start, end, bucket)
             max_duration = store.max_duration(series, now - period_seconds - 3600, now)
             bucket = bucket_seconds(step, max_duration)
             start, end = grid_bounds(now, period_seconds, bucket)
@@ -349,12 +402,18 @@ class HistoryRecorder:
                 end,
                 store.read_measurements(series, start, end, bucket),
                 store.read_regulation(series, start, end),
+                store.read_outdoor(start, end, bucket),
             )
 
         try:
-            bucket, start, end, buckets, regulation = await self.hass.async_add_executor_job(
-                _read
-            )
+            (
+                bucket,
+                start,
+                end,
+                buckets,
+                regulation,
+                outdoor_buckets,
+            ) = await self.hass.async_add_executor_job(_read)
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("Lecture de l'historique Heatwise impossible")
             raise HistoryUnavailableError from err
@@ -366,7 +425,15 @@ class HistoryRecorder:
             if start <= case_start < end and case_start not in buckets:
                 buckets[case_start] = (pending.temperature, pending.humidity)
 
+        if pending_outdoor is not None and pending_outdoor.temperature is not None:
+            case_start = pending_outdoor.start - pending_outdoor.start % bucket
+            if start <= case_start < end and outdoor_buckets.get(case_start) is None:
+                outdoor_buckets[case_start] = pending_outdoor.temperature
+
         temperatures, humidities = fill_grid(buckets, start, end, bucket)
+        outdoor, _ = fill_grid(
+            {case: (value, None) for case, value in outdoor_buckets.items()}, start, end, bucket
+        )
         return {
             "room_id": area.id,
             "period": period,
@@ -376,6 +443,7 @@ class HistoryRecorder:
             "has_data": any(v is not None for v in temperatures + humidities),
             "temperature": temperatures,
             "humidity": humidities,
+            "outdoor": outdoor,
             "regulation": [
                 {
                     "at": _iso(at),
@@ -387,6 +455,77 @@ class HistoryRecorder:
                 for at, state in regulation
             ],
         }
+
+    async def async_get_house_history(self, period: str) -> dict[str, Any]:
+        """Températures de toutes les pièces mesurées et extérieur sur une
+        grille commune (spec 013 US4, contracts/websocket-api.md)."""
+        store = self._store
+        if store is None:
+            raise HistoryUnavailableError
+        period_seconds = int(HISTORY_PERIODS[period].total_seconds())
+        step = HISTORY_PERIOD_STEPS[period]
+        now = int(dt_util.utcnow().timestamp())
+        areas = {area.id: area for area in ar.async_get(self.hass).async_list_areas()}
+        pending = {room_id: self._pending_point(room_id) for room_id in areas}
+        pending_outdoor = self._pending_outdoor()
+
+        def _read() -> tuple[int, int, int, dict[str, dict], dict]:
+            max_duration = store.max_duration_all(now - period_seconds - 3600, now)
+            bucket = bucket_seconds(step, max_duration)
+            start, end = grid_bounds(now, period_seconds, bucket)
+            rooms: dict[str, dict] = {}
+            for room_id, (series, created) in store.active_series_by_room().items():
+                area = areas.get(room_id)
+                if area is None or _created(area) != created:
+                    continue
+                rooms[room_id] = store.read_measurements(series, start, end, bucket)
+            return bucket, start, end, rooms, store.read_outdoor(start, end, bucket)
+
+        try:
+            bucket, start, end, rooms, outdoor_buckets = await self.hass.async_add_executor_job(
+                _read
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception("Lecture de l'historique Heatwise impossible")
+            raise HistoryUnavailableError from err
+
+        def _add_pending(buckets: dict, point: MeasurementPoint | None, value) -> None:
+            if point is None or value is None:
+                return
+            case_start = point.start - point.start % bucket
+            if start <= case_start < end and buckets.get(case_start) in (None, (None, None)):
+                buckets[case_start] = value
+
+        curves = []
+        for room_id, buckets in rooms.items():
+            point = pending.get(room_id)
+            if point is not None:
+                _add_pending(buckets, point, (point.temperature, None))
+            temperatures, _ = fill_grid(buckets, start, end, bucket)
+            if any(value is not None for value in temperatures):
+                curves.append(
+                    {"room_id": room_id, "name": areas[room_id].name, "temperature": temperatures}
+                )
+        curves.sort(key=lambda curve: (curve["name"].casefold(), curve["room_id"]))
+
+        if pending_outdoor is not None:
+            _add_pending(outdoor_buckets, pending_outdoor, pending_outdoor.temperature)
+        outdoor, _ = fill_grid(
+            {case: (value, None) for case, value in outdoor_buckets.items()}, start, end, bucket
+        )
+        return {
+            "period": period,
+            "start": _iso(start),
+            "end": _iso(end),
+            "bucket_seconds": bucket,
+            "rooms": curves,
+            "outdoor": outdoor,
+        }
+
+    def _pending_outdoor(self) -> MeasurementPoint | None:
+        if self._outdoor_sampler is None or self._last_tick is None:
+            return None
+        return self._outdoor_sampler.close(self._last_tick + 60)
 
     def _pending_point(self, room_id: str) -> MeasurementPoint | None:
         sampler = self._samplers.get(room_id)

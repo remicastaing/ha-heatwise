@@ -25,6 +25,7 @@ from . import schedules_store
 from . import sensors as sensors_module
 from .const import DOMAIN, HISTORY_PERIODS
 from .history_recorder import HistoryUnavailableError, get_history_recorder
+from .regulation import SensorHealth
 from .regulator import (
     TEMPORARY_TARGET_ERRORS,
     RoomWithoutRadiatorError,
@@ -689,7 +690,24 @@ async def handle_copy_room_schedule(hass, connection, msg):
 @websocket_api.require_admin
 @websocket_api.async_response
 async def handle_get_settings(hass, connection, msg):
-    connection.send_result(msg["id"], {"settings": await schedules_store.async_get_settings(hass)})
+    settings = await schedules_store.async_get_settings(hass)
+    connection.send_result(
+        msg["id"],
+        {
+            "settings": settings,
+            # Spec 013 : choix de la source de température extérieure.
+            "outdoor_sources": sensors_module.list_outdoor_sources(hass),
+            # Spec 013 US4 : température extérieure actuelle (barre d'outils).
+            "outdoor": _current_outdoor(hass, settings["outdoor_entity_id"]),
+        },
+    )
+
+
+def _current_outdoor(hass, entity_id: str | None) -> dict[str, float | None] | None:
+    if entity_id is None:
+        return None
+    health, value = sensors_module.outdoor_reading(hass, entity_id, dt_util.utcnow())
+    return {"temperature": round(value, 1) if health is SensorHealth.OK else None}
 
 
 @websocket_api.websocket_command(
@@ -700,6 +718,8 @@ async def handle_get_settings(hass, connection, msg):
         # Validé par `schedules_store` (entier 1–60) pour répondre
         # `invalid_history_interval` plutôt qu'une erreur de format (spec 010).
         vol.Optional("history_interval"): vol.Any(int, float),
+        # Spec 013 : `""` efface la source extérieure.
+        vol.Optional("outdoor_entity_id"): str,
     }
 )
 @websocket_api.require_admin
@@ -710,7 +730,12 @@ async def handle_update_settings(hass, connection, msg):
     # (FR-011/FR-022 : au moins un champ à modifier).
     changes = {
         key: msg[key]
-        for key in ("default_temperature", "vacation_mode", "history_interval")
+        for key in (
+            "default_temperature",
+            "vacation_mode",
+            "history_interval",
+            "outdoor_entity_id",
+        )
         if key in msg
     }
     if not changes:
@@ -727,11 +752,35 @@ async def handle_update_settings(hass, connection, msg):
     except schedules_store.InvalidHistoryIntervalError as err:
         connection.send_error(msg["id"], "invalid_history_interval", str(err))
         return
+    except schedules_store.InvalidOutdoorSourceError as err:
+        connection.send_error(msg["id"], "invalid_outdoor_source", str(err))
+        return
 
     connection.send_result(msg["id"], {"settings": settings})
 
 
 # --- Historique (spec 010) ---
+
+
+@websocket_api.websocket_command(
+    {
+        "type": "heatwise/get_house_history",
+        "period": vol.In(list(HISTORY_PERIODS)),
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def handle_get_house_history(hass, connection, msg):
+    """Spec 013 US4 : toutes les pièces et l'extérieur sur une grille commune."""
+    recorder = get_history_recorder(hass)
+    try:
+        if recorder is None:
+            raise HistoryUnavailableError
+        history = await recorder.async_get_house_history(msg["period"])
+    except HistoryUnavailableError:
+        connection.send_error(msg["id"], "history_unavailable", "Historique indisponible.")
+        return
+    connection.send_result(msg["id"], history)
 
 
 @websocket_api.websocket_command(
@@ -888,6 +937,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, handle_get_settings)
     websocket_api.async_register_command(hass, handle_update_settings)
     websocket_api.async_register_command(hass, handle_get_room_history)
+    websocket_api.async_register_command(hass, handle_get_house_history)
     websocket_api.async_register_command(hass, handle_list_sensors)
     websocket_api.async_register_command(hass, handle_set_room_sensor)
     websocket_api.async_register_command(hass, handle_pair_sensor)

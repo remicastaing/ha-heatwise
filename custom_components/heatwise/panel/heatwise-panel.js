@@ -1,6 +1,7 @@
 import { LitElement, html, css } from "./vendor/lit-core.min.js";
 import "./heatwise-schedule.js";
 import "./heatwise-history.js";
+import "./heatwise-house-history.js";
 import { formatMoment, regulationLabel, temporaryTargetLabel } from "./heatwise-labels.js";
 
 // Spec 012 : durées proposées pour une consigne temporaire (minutes).
@@ -96,6 +97,8 @@ class HeatwisePanel extends LitElement {
     _orphanRadiators: { state: true },
     _scheduleRoom: { state: true },
     _historyRoom: { state: true },
+    _houseHistory: { state: true },
+    _outdoor: { state: true },
     _generalSettingsDialog: { state: true },
     _generalSettings: { state: true },
     // Spec 011 : version et mises à jour (US3), chauffe 1 h (US2).
@@ -135,7 +138,8 @@ class HeatwisePanel extends LitElement {
     }
 
     heatwise-schedule,
-    heatwise-history {
+    heatwise-history,
+    heatwise-house-history {
       flex: 1;
       min-height: 0;
     }
@@ -699,7 +703,8 @@ class HeatwisePanel extends LitElement {
         flex-wrap: wrap;
       }
 
-      .toolbar-button .label {
+      .toolbar-button .label,
+      .outdoor-chip .label {
         display: none;
       }
 
@@ -765,7 +770,8 @@ class HeatwisePanel extends LitElement {
     }
 
     .sensor-dialog select,
-    .dialog select.temporary-duration {
+    .dialog select.temporary-duration,
+    .dialog select.outdoor-source {
       display: block;
       width: 100%;
       box-sizing: border-box;
@@ -980,6 +986,25 @@ class HeatwisePanel extends LitElement {
       --mdc-icon-size: 16px;
     }
 
+    .outdoor-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 4px;
+      color: var(--hw-text);
+      font-size: 13px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      --mdc-icon-size: 16px;
+    }
+
+    .outdoor-chip ha-icon,
+    .outdoor-chip .label {
+      color: var(--hw-text-secondary);
+      font-weight: 500;
+    }
+
     .toolbar-button.active {
       background: rgba(249, 115, 22, 0.12);
       border-color: rgba(249, 115, 22, 0.4);
@@ -1088,8 +1113,17 @@ class HeatwisePanel extends LitElement {
     this._radiatorDeletion = null;
     this._scheduleRoom = null;
     this._historyRoom = null;
+    // Spec 013 (US4) : historique de toute la maison, température extérieure.
+    this._houseHistory = false;
+    this._outdoor = null;
     this._generalSettingsDialog = null;
-    this._generalSettings = { default_temperature: 16, vacation_mode: false, history_interval: 10 };
+    this._generalSettings = {
+      default_temperature: 16,
+      vacation_mode: false,
+      history_interval: 10,
+      outdoor_entity_id: null,
+    };
+    this._outdoorSources = [];
     this._minuteTimer = null;
     this._unsubEvents = [];
     this._info = null;
@@ -1125,6 +1159,7 @@ class HeatwisePanel extends LitElement {
     const delay = 60000 - (Date.now() % 60000);
     this._minuteTimer = setTimeout(() => {
       this._loadRooms();
+      this._loadGeneralSettings();
       this._scheduleMinuteTick();
     }, delay);
   }
@@ -1149,6 +1184,15 @@ class HeatwisePanel extends LitElement {
     this._historyRoom = null;
   }
 
+  // Spec 013 (US4) : historique de toutes les pièces et de l'extérieur.
+  _openHouseHistory() {
+    this._houseHistory = true;
+  }
+
+  _closeHouseHistory() {
+    this._houseHistory = false;
+  }
+
   // --- Paramètres généraux et mode vacances (US4, US7) ---
 
   async _loadGeneralSettings() {
@@ -1157,6 +1201,8 @@ class HeatwisePanel extends LitElement {
         type: "heatwise/get_settings",
       });
       this._generalSettings = response.settings;
+      this._outdoorSources = response.outdoor_sources || [];
+      this._outdoor = response.outdoor || null;
     } catch (err) {
       // Repli silencieux sur les valeurs par défaut déjà affichées.
     }
@@ -1167,6 +1213,16 @@ class HeatwisePanel extends LitElement {
     this._generalSettingsDialog = {
       defaultTemperature: String(this._generalSettings.default_temperature),
       historyInterval: String(this._generalSettings.history_interval ?? 10),
+      outdoorEntityId: this._generalSettings.outdoor_entity_id || "",
+      error: null,
+    };
+  }
+
+  // Spec 013 : source de la température extérieure (enregistrement seul).
+  _onOutdoorSourceChange(event) {
+    this._generalSettingsDialog = {
+      ...this._generalSettingsDialog,
+      outdoorEntityId: event.target.value,
       error: null,
     };
   }
@@ -1214,6 +1270,7 @@ class HeatwisePanel extends LitElement {
         type: "heatwise/update_settings",
         default_temperature: value,
         history_interval: interval,
+        outdoor_entity_id: this._generalSettingsDialog.outdoorEntityId,
       });
       this._generalSettings = response.settings;
       this._generalSettingsDialog = null;
@@ -1222,7 +1279,7 @@ class HeatwisePanel extends LitElement {
       this._generalSettingsDialog = {
         ...this._generalSettingsDialog,
         error:
-          err && err.code === "invalid_history_interval"
+          err && (err.code === "invalid_history_interval" || err.code === "invalid_outdoor_source")
             ? err.message
             : "Température invalide : entre 7 et 25 °C, par pas de 0,5.",
       };
@@ -1273,6 +1330,9 @@ class HeatwisePanel extends LitElement {
 
   _onRoomsChanged(eventType) {
     this._loadRooms();
+    if (eventType === "heatwise_schedule_updated") {
+      this._loadGeneralSettings();
+    }
     // La régulation change l'état de chauffe des radiateurs : rafraîchir
     // la fenêtre de la pièce si elle est ouverte (spec 008).
     if (
@@ -2118,6 +2178,18 @@ class HeatwisePanel extends LitElement {
   }
 
   render() {
+    if (this._houseHistory) {
+      const order = [...this._rooms]
+        .sort((a, b) => a.name.localeCompare(b.name, "fr"))
+        .map((room) => room.room_id);
+      return html`
+        <heatwise-house-history
+          .hass=${this.hass}
+          .roomOrder=${order}
+          @close=${this._closeHouseHistory}
+        ></heatwise-house-history>
+      `;
+    }
     if (this._historyRoom) {
       return html`
         <heatwise-history
@@ -2171,6 +2243,24 @@ class HeatwisePanel extends LitElement {
               <ha-icon icon="mdi:view-list-outline"></ha-icon>
             </button>
           </div>
+            ${this._outdoor
+              ? html`<span class="outdoor-chip" title="Température extérieure">
+                  <ha-icon icon="mdi:thermometer"></ha-icon>
+                  <span class="label">Extérieur</span>
+                  ${this._outdoor.temperature === null
+                    ? "—"
+                    : `${formatMeasuredTemperature(this._outdoor.temperature)} °C`}
+                </span>`
+              : ""}
+            <button
+              class="toolbar-button"
+              aria-label="Historique de toutes les pièces"
+              title="Historique de toutes les pièces"
+              @click=${this._openHouseHistory}
+            >
+              <ha-icon icon="mdi:chart-line"></ha-icon>
+              <span class="label">Historique</span>
+            </button>
             <button
               class="toolbar-button ${this._generalSettings.vacation_mode ? "active" : ""}"
               aria-label="Mode vacances"
@@ -2313,7 +2403,18 @@ class HeatwisePanel extends LitElement {
   }
 
   _renderGeneralSettingsDialog() {
-    const { defaultTemperature, historyInterval, error } = this._generalSettingsDialog;
+    const { defaultTemperature, historyInterval, outdoorEntityId, error } =
+      this._generalSettingsDialog;
+    const sources = this._outdoorSources;
+    const missing = outdoorEntityId && !sources.some((s) => s.entity_id === outdoorEntityId);
+    const sourceLabel = (source) => {
+      const value =
+        source.temperature === null || source.temperature === undefined
+          ? ""
+          : ` — ${formatMeasuredTemperature(source.temperature)} °C`;
+      const room = source.room_id ? this._roomById(source.room_id) : null;
+      return `${source.name}${value}${room ? ` (sonde de ${room.name})` : ""}`;
+    };
     return html`
       <div class="dialog-overlay">
         <div class="dialog">
@@ -2350,6 +2451,30 @@ class HeatwisePanel extends LitElement {
               .value=${historyInterval}
               @input=${this._onHistoryIntervalInput}
             />
+            <label for="hw-outdoor-source">Température extérieure</label>
+            <select
+              id="hw-outdoor-source"
+              class="outdoor-source"
+              @change=${this._onOutdoorSourceChange}
+            >
+              <option value="" ?selected=${!outdoorEntityId}>Aucune</option>
+              ${missing
+                ? html`<option value=${outdoorEntityId} selected>
+                    ${outdoorEntityId} (introuvable)
+                  </option>`
+                : ""}
+              ${sources.map(
+                (source) => html`<option
+                  value=${source.entity_id}
+                  ?selected=${source.entity_id === outdoorEntityId}
+                >
+                  ${source.kind === "weather" ? "Météo : " : ""}${sourceLabel(source)}
+                </option>`
+              )}
+            </select>
+            <p class="hint">
+              Enregistrée dans l'historique uniquement ; sans effet sur la régulation.
+            </p>
             ${error ? html`<p class="dialog-error">${error}</p>` : ""}
           </div>
           <div class="dialog-actions">

@@ -16,7 +16,7 @@ import threading
 
 from .history import MeasurementPoint, RegulationState
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS series (
@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS regulation (
     status TEXT NOT NULL,
     reason TEXT,
     PRIMARY KEY (series_id, at)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS outdoor (
+    start INTEGER PRIMARY KEY,
+    duration INTEGER NOT NULL,
+    temperature INTEGER
 ) WITHOUT ROWID;
 """
 
@@ -167,6 +172,26 @@ class HistoryStore:
 
     # --- Lecture (research R6) ---
 
+    def active_series_by_room(self) -> dict[str, tuple[int, str]]:
+        """`room_id → (série active, area_created_at)` (spec 013 US4)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT room_id, id, area_created_at FROM series WHERE deleted_at IS NULL"
+            ).fetchall()
+        return {room_id: (series, created) for room_id, series, created in rows}
+
+    def max_duration_all(self, start: int, end: int) -> int | None:
+        """Plus grande durée de point de la plage, toutes séries et
+        extérieur confondus (grille commune, spec 013 US4)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(d) FROM ("
+                " SELECT MAX(duration) AS d FROM measurements WHERE start >= ? AND start < ?"
+                " UNION ALL SELECT MAX(duration) FROM outdoor WHERE start >= ? AND start < ?)",
+                (start, end, start, end),
+            ).fetchone()
+        return row[0] if row else None
+
     def max_duration(self, series_id: int, start: int, end: int) -> int | None:
         with self._lock:
             row = self._conn.execute(
@@ -199,6 +224,32 @@ class HistoryStore:
             case_start: (_to_float(temperature, 100), _to_float(humidity, 10))
             for case_start, temperature, humidity in rows
         }
+
+    # --- Température extérieure (spec 013, research R1) ---
+
+    def write_outdoor(self, point: MeasurementPoint) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO outdoor VALUES (?, ?, ?)",
+                (point.start, point.duration, _to_int(point.temperature, 100)),
+            )
+
+    def read_outdoor(self, start: int, end: int, bucket: int) -> dict[int, float | None]:
+        """Cases `{début de case: temp}` : moyenne des points qui y
+        commencent, pondérée par leur durée ; `None` si aucune valeur."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT start - (start % :bucket) AS case_start,
+                       SUM(temperature * duration) * 1.0
+                         / SUM(CASE WHEN temperature IS NOT NULL THEN duration END)
+                FROM outdoor
+                WHERE start >= :start AND start < :end
+                GROUP BY case_start
+                """,
+                {"bucket": bucket, "start": start, "end": end},
+            ).fetchall()
+        return {case_start: _to_float(temperature, 100) for case_start, temperature in rows}
 
     def read_regulation(
         self, series_id: int, start: int, end: int

@@ -6,14 +6,33 @@ import { regulationLabel } from "./heatwise-labels.js";
 // FR-013c) à partir de `heatwise/get_room_history`
 // (contracts/websocket-api.md) : `null` = trou, jamais relié (FR-013b).
 
-const PERIODS = [
+export const PERIODS = [
   { id: "24h", label: "24 h" },
   { id: "7d", label: "7 jours" },
   { id: "30d", label: "30 jours" },
 ];
 
-const HEIGHT = 260;
-const MARGIN = { top: 12, right: 40, bottom: 26, left: 40 };
+export const HEIGHT = 260;
+
+// Spec 013 : affichage de la courbe extérieure, mémorisé par navigateur.
+const OUTDOOR_KEY = "heatwise.history.showOutdoor";
+
+function loadShowOutdoor() {
+  try {
+    return window.localStorage.getItem(OUTDOOR_KEY) !== "false";
+  } catch (err) {
+    return true;
+  }
+}
+
+function storeShowOutdoor(value) {
+  try {
+    window.localStorage.setItem(OUTDOOR_KEY, String(value));
+  } catch (err) {
+    // Stockage indisponible : le choix vaut pour la session.
+  }
+}
+export const MARGIN = { top: 12, right: 40, bottom: 26, left: 40 };
 
 // Bandes de fond par état (FR-013) ; la chauffe prime sur le statut.
 const BANDS = {
@@ -30,7 +49,7 @@ function bandKind(change) {
   return BANDS[change.status] ? change.status : null;
 }
 
-function niceRange(values, pad, step) {
+export function niceRange(values, pad, step) {
   if (!values.length) {
     return null;
   }
@@ -39,14 +58,14 @@ function niceRange(values, pad, step) {
   return high > low ? [low, high] : [low - step, high + step];
 }
 
-function formatNumber(value, digits) {
+export function formatNumber(value, digits) {
   return Number(value).toLocaleString("fr-FR", {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   });
 }
 
-function formatInstant(ms, period) {
+export function formatInstant(ms, period) {
   const date = new Date(ms);
   const time = date.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
   if (period === "24h") {
@@ -57,7 +76,7 @@ function formatInstant(ms, period) {
 }
 
 // Graduations de l'axe du temps, alignées sur l'heure locale.
-function timeTicks(startMs, endMs, period) {
+export function timeTicks(startMs, endMs, period) {
   const ticks = [];
   const cursor = new Date(startMs);
   cursor.setMinutes(0, 0, 0);
@@ -88,7 +107,7 @@ function timeTicks(startMs, endMs, period) {
 
 // Chemin SVG d'une série, découpé sur les trous ; un point isolé entre
 // deux trous est rendu comme un point (FR-013b).
-function seriesShapes(values, x, y) {
+export function seriesShapes(values, x, y) {
   const paths = [];
   const dots = [];
   let run = [];
@@ -122,6 +141,7 @@ class HeatwiseHistory extends LitElement {
     _error: { state: true },
     _width: { state: true },
     _hover: { state: true },
+    _showOutdoor: { state: true },
   };
 
   static styles = css`
@@ -137,6 +157,7 @@ class HeatwiseHistory extends LitElement {
       --hw-temperature: var(--hw-accent);
       --hw-humidity: #43a047;
       --hw-target: #d97706;
+      --hw-outdoor: #78909c;
       font-family: var(--paper-font-body1_-_font-family, inherit);
       color: var(--hw-text);
     }
@@ -261,6 +282,15 @@ class HeatwiseHistory extends LitElement {
       height: 0;
       border-top: 2px solid;
     }
+    .legend label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+    .legend input {
+      margin: 0;
+    }
     .swatch-band {
       width: 12px;
       height: 12px;
@@ -285,6 +315,7 @@ class HeatwiseHistory extends LitElement {
     this._error = null;
     this._width = 0;
     this._hover = null;
+    this._showOutdoor = loadShowOutdoor();
     this._resizeObserver = new ResizeObserver((entries) => {
       const width = Math.floor(entries[0].contentRect.width);
       if (width !== this._width) {
@@ -357,7 +388,9 @@ class HeatwiseHistory extends LitElement {
 
     const temperatures = data.temperature.filter((v) => v !== null);
     const targets = data.regulation.map((c) => c.target);
-    const tempRange = niceRange([...temperatures, ...targets], 0.5, 1) || [15, 25];
+    // L'extérieur n'entre dans l'échelle que s'il est affiché (research R6).
+    const outdoor = this._outdoorShown() ? data.outdoor.filter((v) => v !== null) : [];
+    const tempRange = niceRange([...temperatures, ...targets, ...outdoor], 0.5, 1) || [15, 25];
     const humidities = data.humidity.filter((v) => v !== null);
     const humRange = humidities.length
       ? niceRange(humidities, 5, 10).map((v) => Math.min(100, Math.max(0, v)))
@@ -381,6 +414,19 @@ class HeatwiseHistory extends LitElement {
       yTemp: scale(tempRange),
       yHum: humRange ? scale(humRange) : null,
     };
+  }
+
+  _hasOutdoor() {
+    return Boolean(this._data && this._data.outdoor && this._data.outdoor.some((v) => v !== null));
+  }
+
+  _outdoorShown() {
+    return this._showOutdoor && this._hasOutdoor();
+  }
+
+  _toggleOutdoor(event) {
+    this._showOutdoor = event.target.checked;
+    storeShowOutdoor(this._showOutdoor);
   }
 
   // Changements de régulation sous forme d'intervalles [début, fin).
@@ -411,6 +457,9 @@ class HeatwiseHistory extends LitElement {
     const segments = this._segments(g);
     const temp = seriesShapes(this._data.temperature, g.xIndex, g.yTemp);
     const hum = g.yHum ? seriesShapes(this._data.humidity, g.xIndex, g.yHum) : { paths: [], dots: [] };
+    const out = this._outdoorShown()
+      ? seriesShapes(this._data.outdoor, g.xIndex, g.yTemp)
+      : { paths: [], dots: [] };
     const target = segments
       .map((s) => `M${g.xMs(s.fromMs).toFixed(1)},${g.yTemp(s.target).toFixed(1)}H${g.xMs(s.toMs).toFixed(1)}`)
       .join("");
@@ -450,6 +499,8 @@ class HeatwiseHistory extends LitElement {
             <text class="axis" x=${g.xMs(t.ms)} y=${bottom + 17} text-anchor="middle">${t.label}</text>`
         )}
         <path d=${target} fill="none" stroke="var(--hw-target)" stroke-width="1.5" stroke-dasharray="5 3"></path>
+        ${out.paths.map((d) => svg`<path d=${d} fill="none" stroke="var(--hw-outdoor)" stroke-width="1.2" stroke-dasharray="2 2"></path>`)}
+        ${out.dots.map(([cx, cy]) => svg`<circle cx=${cx} cy=${cy} r="1.8" fill="var(--hw-outdoor)"></circle>`)}
         ${hum.paths.map((d) => svg`<path d=${d} fill="none" stroke="var(--hw-humidity)" stroke-width="1.2" opacity="0.8"></path>`)}
         ${hum.dots.map(([cx, cy]) => svg`<circle cx=${cx} cy=${cy} r="2" fill="var(--hw-humidity)"></circle>`)}
         ${temp.paths.map((d) => svg`<path d=${d} fill="none" stroke="var(--hw-temperature)" stroke-width="2"></path>`)}
@@ -466,6 +517,7 @@ class HeatwiseHistory extends LitElement {
     const ms = g.startMs + index * g.bucketMs;
     const temperature = this._data.temperature[index];
     const humidity = this._data.humidity[index];
+    const outdoor = this._data.outdoor ? this._data.outdoor[index] : null;
     const state = this._stateAt(ms + g.bucketMs / 2, segments);
     const label = state ? regulationLabel({ ...state, suspended_until: null }) : null;
     const x = g.xIndex(index);
@@ -475,6 +527,9 @@ class HeatwiseHistory extends LitElement {
         <strong>${formatInstant(ms, this._period)}</strong>
         Température : ${temperature === null ? "—" : `${formatNumber(temperature, 1)} °C`}<br />
         Humidité : ${humidity === null ? "—" : `${Math.round(humidity)} %`}<br />
+        ${this._outdoorShown() && outdoor !== null && outdoor !== undefined
+          ? html`Extérieur : ${formatNumber(outdoor, 1)} °C<br />`
+          : ""}
         ${state ? html`Consigne : ${formatNumber(state.target, 1)} °C<br />` : ""}
         ${label ? html`${state.heating && state.status !== "heating" ? "Chauffe — " : ""}${label.text}` : ""}
       </div>
@@ -487,6 +542,12 @@ class HeatwiseHistory extends LitElement {
         <span><i class="swatch-line" style="border-color: var(--hw-temperature)"></i>Température</span>
         <span><i class="swatch-line" style="border-color: var(--hw-humidity)"></i>Humidité</span>
         <span><i class="swatch-line" style="border-color: var(--hw-target); border-top-style: dashed"></i>Consigne</span>
+        ${this._hasOutdoor()
+          ? html`<label>
+              <input type="checkbox" .checked=${this._showOutdoor} @change=${this._toggleOutdoor} />
+              <i class="swatch-line" style="border-color: var(--hw-outdoor); border-top-style: dotted"></i>Extérieur
+            </label>`
+          : ""}
         ${Object.values(BANDS).map(
           (band) => html`<span><i class="swatch-band" style="background: ${band.color}"></i>${band.label}</span>`
         )}
