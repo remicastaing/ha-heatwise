@@ -55,6 +55,32 @@ function normalizeSearch(text) {
     .toLowerCase();
 }
 
+// Version du code de ce panneau, lue dans l'URL de son module
+// (`/heatwise_static/<version>/heatwise-panel.js`, cf. `__init__.py`).
+// Après une mise à jour et un redémarrage, l'interface de Home Assistant
+// se reconnecte sans recharger le JavaScript des panneaux : l'ancien code
+// tournerait face au nouveau serveur. On recharge alors la page, une
+// seule fois par version (garde contre une boucle de rechargements).
+const PANEL_VERSION = (() => {
+  const match = /\/heatwise_static\/([^/]+)\//.exec(import.meta.url);
+  return match ? decodeURIComponent(match[1]) : null;
+})();
+const RELOAD_GUARD_KEY = "heatwise.reloadedForVersion";
+
+function reloadForVersion(serverVersion) {
+  try {
+    if (window.sessionStorage.getItem(RELOAD_GUARD_KEY) === serverVersion) {
+      return false;
+    }
+    window.sessionStorage.setItem(RELOAD_GUARD_KEY, serverVersion);
+  } catch (err) {
+    // Sans stockage, pas de garde : on ne recharge pas, pour ne jamais boucler.
+    return false;
+  }
+  window.location.reload();
+  return true;
+}
+
 function loadStoredViewMode() {
   try {
     const stored = window.localStorage.getItem(VIEW_MODE_STORAGE_KEY);
@@ -1102,6 +1128,12 @@ class HeatwisePanel extends LitElement {
     this._pairingUnsub = null;
     this._pairingTimer = null;
     this._pairingDisconnectListener = null;
+    // Reconnexion après un redémarrage de Home Assistant : relire la
+    // version du serveur (et recharger la page si elle a changé).
+    this._readyConnection = null;
+    this._onConnectionReady = () => {
+      this._loadInfo();
+    };
     this._onKeyDown = (event) => {
       if (event.key === "Escape" && this._sensorDialog) {
         this._closeSensorDialog();
@@ -1150,6 +1182,10 @@ class HeatwisePanel extends LitElement {
     }
     this._unsubEvents.forEach((unsub) => unsub());
     this._unsubEvents = [];
+    if (this._readyConnection) {
+      this._readyConnection.removeEventListener("ready", this._onConnectionReady);
+      this._readyConnection = null;
+    }
   }
 
   _scheduleMinuteTick() {
@@ -1310,6 +1346,8 @@ class HeatwisePanel extends LitElement {
       this._loadRooms();
       this._loadGeneralSettings();
       this._loadInfo();
+      this._readyConnection = this.hass.connection;
+      this._readyConnection.addEventListener("ready", this._onConnectionReady);
       // `area_registry_updated` : association de sonde faite depuis
       // Heatwise ou depuis Paramètres → Zones (spec 006, research R7).
       // `heatwise_regulation_updated` : état de régulation d'une pièce
@@ -1410,8 +1448,14 @@ class HeatwisePanel extends LitElement {
       });
     } catch (err) {
       this._info = null;
+      return;
+    }
+    const serverVersion = this._info.version ? String(this._info.version) : null;
+    if (PANEL_VERSION && serverVersion && PANEL_VERSION !== serverVersion) {
+      reloadForVersion(serverVersion);
     }
   }
+
 
   // État dérivé de l'entité `update` HACS (data-model, « Information de
   // mise à jour ») : none, available, installing, restart.
