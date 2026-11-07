@@ -13,11 +13,13 @@ export const PERIODS = [
 ];
 
 export const HEIGHT = 260;
+// Spec 013 (US4) : hauteur d'un graphique de l'historique de toute la maison.
+const COMPACT_HEIGHT = 190;
 
 // Spec 013 : affichage de la courbe extérieure, mémorisé par navigateur.
 const OUTDOOR_KEY = "heatwise.history.showOutdoor";
 
-function loadShowOutdoor() {
+export function loadShowOutdoor() {
   try {
     return window.localStorage.getItem(OUTDOOR_KEY) !== "false";
   } catch (err) {
@@ -25,7 +27,7 @@ function loadShowOutdoor() {
   }
 }
 
-function storeShowOutdoor(value) {
+export function storeShowOutdoor(value) {
   try {
     window.localStorage.setItem(OUTDOOR_KEY, String(value));
   } catch (err) {
@@ -35,7 +37,7 @@ function storeShowOutdoor(value) {
 export const MARGIN = { top: 12, right: 40, bottom: 26, left: 40 };
 
 // Bandes de fond par état (FR-013) ; la chauffe prime sur le statut.
-const BANDS = {
+export const BANDS = {
   heating: { label: "Chauffe", color: "rgba(249, 115, 22, 0.22)" },
   suspended: { label: "Suspendue", color: "rgba(124, 58, 237, 0.13)" },
   safety_stop: { label: "Arrêt de sécurité", color: "rgba(220, 38, 38, 0.16)" },
@@ -135,6 +137,11 @@ class HeatwiseHistory extends LitElement {
     hass: { attribute: false },
     roomId: { type: String },
     roomName: { type: String },
+    // Spec 013 (US4) : graphique intégré à l'historique de toute la maison,
+    // qui fixe la période et l'affichage de l'extérieur.
+    period: { type: String },
+    compact: { type: Boolean },
+    showOutdoor: { attribute: false },
     _period: { state: true },
     _data: { state: true },
     _loading: { state: true },
@@ -316,6 +323,9 @@ class HeatwiseHistory extends LitElement {
     this._width = 0;
     this._hover = null;
     this._showOutdoor = loadShowOutdoor();
+    this.period = undefined;
+    this.compact = false;
+    this.showOutdoor = undefined;
     this._resizeObserver = new ResizeObserver((entries) => {
       const width = Math.floor(entries[0].contentRect.width);
       if (width !== this._width) {
@@ -326,7 +336,22 @@ class HeatwiseHistory extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    if (this.period) {
+      this._period = this.period;
+    }
     this._load();
+  }
+
+  updated(changedProps) {
+    if (changedProps.has("period") && this.period && this.period !== this._period) {
+      this._period = this.period;
+      this._hover = null;
+      this._load();
+    }
+  }
+
+  _height() {
+    return this.compact ? COMPACT_HEIGHT : HEIGHT;
   }
 
   disconnectedCallback() {
@@ -380,7 +405,7 @@ class HeatwiseHistory extends LitElement {
     const data = this._data;
     const width = Math.max(this._width, 240);
     const plotWidth = width - MARGIN.left - MARGIN.right;
-    const plotHeight = HEIGHT - MARGIN.top - MARGIN.bottom;
+    const plotHeight = this._height() - MARGIN.top - MARGIN.bottom;
     const startMs = Date.parse(data.start);
     const endMs = Date.parse(data.end);
     const count = data.temperature.length;
@@ -421,7 +446,8 @@ class HeatwiseHistory extends LitElement {
   }
 
   _outdoorShown() {
-    return this._showOutdoor && this._hasOutdoor();
+    const show = this.showOutdoor === undefined ? this._showOutdoor : this.showOutdoor;
+    return show && this._hasOutdoor();
   }
 
   _toggleOutdoor(event) {
@@ -473,7 +499,7 @@ class HeatwiseHistory extends LitElement {
     const hover = this._hover;
 
     return svg`
-      <svg width=${g.width} height=${HEIGHT} role="img"
+      <svg width=${g.width} height=${this._height()} role="img"
         aria-label="Historique de température et d'humidité"
         @pointermove=${(e) => this._onPointer(e, g)}
         @pointerdown=${(e) => this._onPointer(e, g)}
@@ -573,6 +599,9 @@ class HeatwiseHistory extends LitElement {
   }
 
   render() {
+    if (this.compact) {
+      return html`<div class="chart">${this._renderBody()}</div>`;
+    }
     return html`
       <div class="header">
         <h2 title="Historique — ${this.roomName}">Historique — ${this.roomName}</h2>

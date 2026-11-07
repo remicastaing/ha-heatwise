@@ -2179,13 +2179,10 @@ class HeatwisePanel extends LitElement {
 
   render() {
     if (this._houseHistory) {
-      const order = [...this._rooms]
-        .sort((a, b) => a.name.localeCompare(b.name, "fr"))
-        .map((room) => room.room_id);
       return html`
         <heatwise-house-history
           .hass=${this.hass}
-          .roomOrder=${order}
+          .rooms=${this._rooms}
           @close=${this._closeHouseHistory}
         ></heatwise-house-history>
       `;

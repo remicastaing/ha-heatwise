@@ -196,9 +196,10 @@ dongle ci-dessus) :
    n'a **aucun effet sur la régulation** : elle sert à l'analyse.
    L'historique de chaque pièce affiche la courbe extérieure, masquable.
 11. **Historique de toute la maison** : bouton « Historique » de la barre
-   d'outils. Une courbe de température par pièce et l'extérieur sur un
-   même graphique (24 h, 7 jours, 30 jours) ; chaque courbe se masque
-   depuis la légende.
+   d'outils. Un graphique par pièce, les uns sous les autres (température,
+   humidité, consigne, états de régulation et extérieur), sur une période
+   commune (24 h, 7 jours, 30 jours) ; la courbe extérieure se masque pour
+   tous les graphiques depuis la légende.
 
 ## Assistant IA (MCP)
 

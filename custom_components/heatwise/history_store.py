@@ -172,26 +172,6 @@ class HistoryStore:
 
     # --- Lecture (research R6) ---
 
-    def active_series_by_room(self) -> dict[str, tuple[int, str]]:
-        """`room_id → (série active, area_created_at)` (spec 013 US4)."""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT room_id, id, area_created_at FROM series WHERE deleted_at IS NULL"
-            ).fetchall()
-        return {room_id: (series, created) for room_id, series, created in rows}
-
-    def max_duration_all(self, start: int, end: int) -> int | None:
-        """Plus grande durée de point de la plage, toutes séries et
-        extérieur confondus (grille commune, spec 013 US4)."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT MAX(d) FROM ("
-                " SELECT MAX(duration) AS d FROM measurements WHERE start >= ? AND start < ?"
-                " UNION ALL SELECT MAX(duration) FROM outdoor WHERE start >= ? AND start < ?)",
-                (start, end, start, end),
-            ).fetchone()
-        return row[0] if row else None
-
     def max_duration(self, series_id: int, start: int, end: int) -> int | None:
         with self._lock:
             row = self._conn.execute(

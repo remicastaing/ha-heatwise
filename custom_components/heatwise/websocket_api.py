@@ -764,27 +764,6 @@ async def handle_update_settings(hass, connection, msg):
 
 @websocket_api.websocket_command(
     {
-        "type": "heatwise/get_house_history",
-        "period": vol.In(list(HISTORY_PERIODS)),
-    }
-)
-@websocket_api.require_admin
-@websocket_api.async_response
-async def handle_get_house_history(hass, connection, msg):
-    """Spec 013 US4 : toutes les pièces et l'extérieur sur une grille commune."""
-    recorder = get_history_recorder(hass)
-    try:
-        if recorder is None:
-            raise HistoryUnavailableError
-        history = await recorder.async_get_house_history(msg["period"])
-    except HistoryUnavailableError:
-        connection.send_error(msg["id"], "history_unavailable", "Historique indisponible.")
-        return
-    connection.send_result(msg["id"], history)
-
-
-@websocket_api.websocket_command(
-    {
         "type": "heatwise/get_room_history",
         "room_id": str,
         "period": vol.In(list(HISTORY_PERIODS)),
@@ -937,7 +916,6 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, handle_get_settings)
     websocket_api.async_register_command(hass, handle_update_settings)
     websocket_api.async_register_command(hass, handle_get_room_history)
-    websocket_api.async_register_command(hass, handle_get_house_history)
     websocket_api.async_register_command(hass, handle_list_sensors)
     websocket_api.async_register_command(hass, handle_set_room_sensor)
     websocket_api.async_register_command(hass, handle_pair_sensor)
