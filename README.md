@@ -141,16 +141,18 @@ dongle ci-dessus) :
    liste (choix mémorisé par navigateur).
 
    **Mises à jour** : si une entité `update` annonce les versions de
-   Heatwise (installation via HACS), le panneau lui demande de vérifier
+   Heatwise (installation via la Marketplace de Home Assistant ou via
+   HACS), le panneau lui demande de vérifier
    le dépôt à son ouverture (au plus une fois par heure) ; cliquer sur la
    version dans l'en-tête force la vérification. Quand une version plus récente existe, un bandeau
    l'indique, avec le lien vers les notes de version et un bouton
    « Mettre à jour » : après confirmation, la version est installée puis
    Home Assistant redémarre automatiquement, et la page se recharge
    d'elle-même avec le nouveau panneau. Sans HACS, seule la version
-   s'affiche. La vérification passe par `homeassistant.update_entity`, ou
-   par la commande interne de HACS `hacs/repository/refresh` pour une
-   entité HACS ; « Actualiser les informations » dans HACS reste possible.
+   s'affiche. La vérification passe par la commande du magasin
+   (`marketplace/repository/refresh` ou `hacs/repository/refresh`, non
+   documentées), à défaut par `homeassistant.update_entity` ;
+   « Actualiser les informations » dans le magasin reste possible.
 7. **Renommer une pièce** : section « Pièce » des paramètres de la pièce
    → modifier le nom → « Renommer ». La Zone Home Assistant est renommée
    (Paramètres → Zones affiche le même nom) ; radiateurs, programmation

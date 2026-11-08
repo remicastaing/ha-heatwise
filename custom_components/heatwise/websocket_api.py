@@ -326,14 +326,20 @@ async def handle_set_radiator_heating(hass, connection, msg):
     connection.send_result(msg["id"], {"radiator": radiator})
 
 
+# Magasins d'intégrations qui créent une entité `update` par dépôt installé
+# et offrent la commande websocket `<domaine>/repository/refresh` : HACS, et
+# l'intégration native `marketplace` de Home Assistant qui l'a remplacé.
+STORE_PLATFORMS = ("hacs", "marketplace")
+
+
 def _find_hacs_update_entity(
     hass: HomeAssistant, documentation: str | None, name: str
 ) -> er.RegistryEntry | None:
     """Entité `update` qui annonce les versions de Heatwise (spec 011,
-    research R6), quelle que soit l'intégration qui la fournit : constat
-    en production en 0.0.15, `update.heatwise` n'appartient pas à
-    l'intégration `hacs`. Pour une entité HACS, son `unique_id` est
-    l'identifiant HACS du dépôt. `None` si aucune.
+    research R6), quelle que soit l'intégration qui la fournit : HACS, ou
+    l'intégration native `marketplace` de Home Assistant qui l'a remplacé
+    (constat en production en 0.0.17). Pour ces deux magasins, son
+    `unique_id` est l'identifiant du dépôt. `None` si aucune.
 
     Critères, du plus sûr au moins sûr, d'après ce que HACS 2.x publie
     réellement (hacs/entity.py, hacs/update.py ; constat en production en
@@ -351,8 +357,8 @@ def _find_hacs_update_entity(
             for entry in er.async_get(hass).entities.values()
             if entry.domain == "update" and entry.platform != DOMAIN
         ),
-        # Une entité HACS d'abord, à critère égal (actualisation possible).
-        key=lambda entry: (entry.platform != "hacs", entry.entity_id),
+        # Une entité de magasin d'abord, à critère égal (actualisation possible).
+        key=lambda entry: (entry.platform not in STORE_PLATFORMS, entry.entity_id),
     )
     repository = (documentation or "").rstrip("/").lower()
     # Icône d'une entité `update` : `brands.home-assistant.io/_/<domaine>/`
@@ -375,11 +381,11 @@ def _find_hacs_update_entity(
         return picture.endswith(icon_suffixes)
 
     def by_device_name(entry: er.RegistryEntry) -> bool:
-        # Seulement pour HACS : ailleurs, un appareil peut s'appeler
+        # Seulement pour un magasin : ailleurs, un appareil peut s'appeler
         # « Heatwise » sans annoncer les versions de l'intégration.
         device = device_of(entry)
         return (
-            entry.platform == "hacs"
+            entry.platform in STORE_PLATFORMS
             and device is not None
             and (device.name_by_user or device.name) == name
         )
@@ -415,10 +421,11 @@ async def handle_get_info(hass, connection, msg):
             "version": str(integration.version) if integration.version else None,
             "update_entity_id": entry.entity_id if entry else None,
             "update_platform": entry.platform if entry else None,
-            # Identifiant HACS du dépôt (entité HACS seulement) : le panneau
-            # demande à HACS de relire le dépôt (`hacs/repository/refresh`).
-            "hacs_repository_id": (
-                entry.unique_id if entry and entry.platform == "hacs" else None
+            # Identifiant du dépôt dans le magasin (HACS ou Marketplace) : le
+            # panneau lui demande de relire le dépôt
+            # (`<update_platform>/repository/refresh`).
+            "store_repository_id": (
+                entry.unique_id if entry and entry.platform in STORE_PLATFORMS else None
             ),
         },
     )

@@ -1496,13 +1496,15 @@ class HeatwisePanel extends LitElement {
   }
 
   // Demande à la source des mises à jour de relire la dernière version
-  // de Heatwise : pour une entité HACS, `hacs/repository/refresh` (ce que
-  // fait « Actualiser les informations », commande interne non
-  // documentée) ; pour une autre intégration (constat en production en
-  // 0.0.15), le service générique `homeassistant.update_entity`. En cas
+  // de Heatwise. Pour un magasin (HACS, ou l'intégration native
+  // `marketplace` qui l'a remplacé), `<magasin>/repository/refresh` : ce
+  // que fait « Actualiser les informations », commande non documentée.
+  // Sinon, le service générique `homeassistant.update_entity` (qui, lui,
+  // ne relit pas GitHub pour Marketplace : constat en 0.0.17). En cas
   // d'échec, la vérification manuelle le signale.
   async _checkForUpdate(manual) {
-    const repository = this._info && this._info.hacs_repository_id;
+    const repository = this._info && this._info.store_repository_id;
+    const store = this._info && this._info.update_platform;
     const entityId = this._info && this._info.update_entity_id;
     if (!repository && !entityId) {
       if (manual) {
@@ -1519,7 +1521,7 @@ class HeatwisePanel extends LitElement {
     try {
       if (repository) {
         await this.hass.connection.sendMessagePromise({
-          type: "hacs/repository/refresh",
+          type: `${store}/repository/refresh`,
           repository,
         });
       } else {
