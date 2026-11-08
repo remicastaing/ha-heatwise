@@ -69,6 +69,7 @@ def _state(row: tuple) -> RegulationState:
 class HistoryStore:
     def __init__(self, path: str | Path) -> None:
         self._lock = threading.Lock()
+        self._path = Path(path)
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         with self._lock, self._conn:
             self._conn.execute("PRAGMA journal_mode=WAL")
@@ -78,6 +79,21 @@ class HistoryStore:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def export_copy(self, dest: str | Path) -> None:
+        """Copie cohérente et autonome de la base, journal WAL compris (spec
+        013). Une connexion de lecture dédiée évite de prendre le verrou : les
+        écritures de l'historique continuent pendant la copie."""
+        source = sqlite3.connect(f"{self._path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            target = sqlite3.connect(str(dest))
+            try:
+                source.backup(target)
+                target.execute("PRAGMA journal_mode=DELETE")
+            finally:
+                target.close()
+        finally:
+            source.close()
 
     # --- Séries (research R4) ---
 

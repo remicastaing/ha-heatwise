@@ -195,6 +195,9 @@ dongle ci-dessus) :
    conservé sans limite de durée dans `heatwise_history.db` (dossier de
    configuration de Home Assistant, inclus dans ses sauvegardes) :
    environ 1 Mo par pièce et par an à 10 min, dix fois plus à 1 min.
+   Le bouton « Télécharger la base d'historique » de ces paramètres
+   (administrateurs seulement) en fournit une copie complète, sans effet
+   sur l'enregistrement ni sur la régulation.
 10. **Température extérieure** : dans les paramètres Heatwise (icône ⚙),
    choisir un capteur de température ou une entité météo. Sa valeur
    actuelle s'affiche dans la barre d'outils et elle est enregistrée dans

@@ -97,6 +97,17 @@ class HistoryRecorder:
         self._unsubs: list[Any] = []
         self._stopped = False
 
+    async def async_export(self, dest: str) -> None:
+        """Écrit une copie de la base dans `dest` (spec 013, téléchargement)."""
+        store = self._store
+        if store is None:
+            raise HistoryUnavailableError
+        try:
+            await self.hass.async_add_executor_job(store.export_copy, dest)
+        except Exception as err:  # noqa: BLE001 — sans effet sur l'enregistrement
+            _LOGGER.exception("Export de la base d'historique Heatwise impossible")
+            raise HistoryUnavailableError from err
+
     # --- Cycle de vie ---
 
     async def async_start(self) -> None:

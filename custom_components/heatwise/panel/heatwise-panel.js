@@ -1303,6 +1303,29 @@ class HeatwisePanel extends LitElement {
     this._generalSettingsDialog = null;
   }
 
+  // Spec 013 : copie de la base pour le banc d'essai. Une navigation n'envoie
+  // pas de jeton : le téléchargement passe par un lien signé de courte durée.
+  async _downloadHistoryDatabase() {
+    try {
+      const { path } = await this.hass.connection.sendMessagePromise({
+        type: "auth/sign_path",
+        path: "/api/heatwise/history.db",
+        expires: 60,
+      });
+      const link = document.createElement("a");
+      link.href = path;
+      link.download = "";
+      document.body.append(link);
+      link.click();
+      link.remove();
+    } catch (err) {
+      this._generalSettingsDialog = {
+        ...this._generalSettingsDialog,
+        error: "Téléchargement impossible.",
+      };
+    }
+  }
+
   _onDefaultTemperatureInput(event) {
     this._generalSettingsDialog = {
       ...this._generalSettingsDialog,
@@ -2633,6 +2656,9 @@ class HeatwisePanel extends LitElement {
             <p class="hint">
               Enregistrée dans l'historique uniquement ; sans effet sur la régulation.
             </p>
+            <button class="button-secondary" @click=${this._downloadHistoryDatabase}>
+              Télécharger la base d'historique
+            </button>
             ${error ? html`<p class="dialog-error">${error}</p>` : ""}
           </div>
           <div class="dialog-actions">
