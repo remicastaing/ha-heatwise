@@ -329,9 +329,11 @@ async def handle_set_radiator_heating(hass, connection, msg):
 def _find_hacs_update_entity(
     hass: HomeAssistant, documentation: str | None, name: str
 ) -> er.RegistryEntry | None:
-    """Entité `update` que HACS crée pour Heatwise (spec 011, research
-    R6). Son `unique_id` est l'identifiant HACS du dépôt. `None` sans
-    HACS.
+    """Entité `update` qui annonce les versions de Heatwise (spec 011,
+    research R6), quelle que soit l'intégration qui la fournit : constat
+    en production en 0.0.15, `update.heatwise` n'appartient pas à
+    l'intégration `hacs`. Pour une entité HACS, son `unique_id` est
+    l'identifiant HACS du dépôt. `None` si aucune.
 
     Critères, du plus sûr au moins sûr, d'après ce que HACS 2.x publie
     réellement (hacs/entity.py, hacs/update.py ; constat en production en
@@ -343,13 +345,19 @@ def _find_hacs_update_entity(
        l'intégration ;
     puis, par compatibilité, l'URL de l'appareil ou l'attribut `title`."""
     device_registry = dr.async_get(hass)
-    candidates = [
-        entry
-        for entry in er.async_get(hass).entities.values()
-        if entry.domain == "update" and entry.platform == "hacs"
-    ]
+    candidates = sorted(
+        (
+            entry
+            for entry in er.async_get(hass).entities.values()
+            if entry.domain == "update" and entry.platform != DOMAIN
+        ),
+        # Une entité HACS d'abord, à critère égal (actualisation possible).
+        key=lambda entry: (entry.platform != "hacs", entry.entity_id),
+    )
     repository = (documentation or "").rstrip("/").lower()
-    icon_suffix = f"/_/{DOMAIN}/icon.png"
+    # Icône d'une entité `update` : `brands.home-assistant.io/_/<domaine>/`
+    # (HACS) ou `/api/brands/integration/<domaine>/` (relevé en production).
+    icon_suffixes = (f"/_/{DOMAIN}/icon.png", f"/integration/{DOMAIN}/icon.png")
 
     def attributes(entry: er.RegistryEntry) -> dict[str, Any]:
         state = hass.states.get(entry.entity_id)
@@ -363,11 +371,18 @@ def _find_hacs_update_entity(
         return bool(repository) and (url == repository or url.startswith(f"{repository}/"))
 
     def by_icon(entry: er.RegistryEntry) -> bool:
-        return str(attributes(entry).get("entity_picture") or "").endswith(icon_suffix)
+        picture = str(attributes(entry).get("entity_picture") or "").split("?")[0]
+        return picture.endswith(icon_suffixes)
 
     def by_device_name(entry: er.RegistryEntry) -> bool:
+        # Seulement pour HACS : ailleurs, un appareil peut s'appeler
+        # « Heatwise » sans annoncer les versions de l'intégration.
         device = device_of(entry)
-        return device is not None and (device.name_by_user or device.name) == name
+        return (
+            entry.platform == "hacs"
+            and device is not None
+            and (device.name_by_user or device.name) == name
+        )
 
     def by_device_url(entry: er.RegistryEntry) -> bool:
         device = device_of(entry)
@@ -399,9 +414,12 @@ async def handle_get_info(hass, connection, msg):
         {
             "version": str(integration.version) if integration.version else None,
             "update_entity_id": entry.entity_id if entry else None,
-            # Identifiant HACS du dépôt : le panneau demande à HACS de
-            # rafraîchir ses informations (`hacs/repository/refresh`).
-            "hacs_repository_id": entry.unique_id if entry else None,
+            "update_platform": entry.platform if entry else None,
+            # Identifiant HACS du dépôt (entité HACS seulement) : le panneau
+            # demande à HACS de relire le dépôt (`hacs/repository/refresh`).
+            "hacs_repository_id": (
+                entry.unique_id if entry and entry.platform == "hacs" else None
+            ),
         },
     )
 
