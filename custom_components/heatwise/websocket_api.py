@@ -5,6 +5,8 @@ contracts/websocket-api.md, specs 002 à 006).
 """
 from __future__ import annotations
 
+from typing import Any
+
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
@@ -328,25 +330,57 @@ def _find_hacs_update_entity(
     hass: HomeAssistant, documentation: str | None, name: str
 ) -> er.RegistryEntry | None:
     """Entité `update` que HACS crée pour Heatwise (spec 011, research
-    R6) : retrouvée par l'URL de dépôt de son appareil (= `documentation`
-    du manifeste), à défaut par son titre. `None` sans HACS. Son
-    `unique_id` est l'identifiant HACS du dépôt."""
+    R6). Son `unique_id` est l'identifiant HACS du dépôt. `None` sans
+    HACS.
+
+    Critères, du plus sûr au moins sûr, d'après ce que HACS 2.x publie
+    réellement (hacs/entity.py, hacs/update.py ; constat en production en
+    0.0.14 : ni `title`, ni URL GitHub sur l'appareil, dont la
+    `configuration_url` vaut `homeassistant://hacs/repository/<id>`) :
+    1. `release_url` sous l'URL du dépôt (= `documentation` du manifeste) ;
+    2. icône `entity_picture` du domaine Heatwise ;
+    3. nom de l'appareil HACS (= nom affiché du dépôt) égal au nom de
+       l'intégration ;
+    puis, par compatibilité, l'URL de l'appareil ou l'attribut `title`."""
     device_registry = dr.async_get(hass)
     candidates = [
         entry
         for entry in er.async_get(hass).entities.values()
         if entry.domain == "update" and entry.platform == "hacs"
     ]
-    wanted = (documentation or "").rstrip("/").lower()
-    for entry in candidates:
-        device = device_registry.async_get(entry.device_id) if entry.device_id else None
-        url = (device.configuration_url or "") if device else ""
-        if wanted and url.rstrip("/").lower() == wanted:
-            return entry
-    for entry in candidates:
+    repository = (documentation or "").rstrip("/").lower()
+    icon_suffix = f"/_/{DOMAIN}/icon.png"
+
+    def attributes(entry: er.RegistryEntry) -> dict[str, Any]:
         state = hass.states.get(entry.entity_id)
-        if state is not None and state.attributes.get("title") == name:
-            return entry
+        return dict(state.attributes) if state is not None else {}
+
+    def device_of(entry: er.RegistryEntry) -> dr.DeviceEntry | None:
+        return device_registry.async_get(entry.device_id) if entry.device_id else None
+
+    def by_release_url(entry: er.RegistryEntry) -> bool:
+        url = str(attributes(entry).get("release_url") or "").lower()
+        return bool(repository) and (url == repository or url.startswith(f"{repository}/"))
+
+    def by_icon(entry: er.RegistryEntry) -> bool:
+        return str(attributes(entry).get("entity_picture") or "").endswith(icon_suffix)
+
+    def by_device_name(entry: er.RegistryEntry) -> bool:
+        device = device_of(entry)
+        return device is not None and (device.name_by_user or device.name) == name
+
+    def by_device_url(entry: er.RegistryEntry) -> bool:
+        device = device_of(entry)
+        url = (device.configuration_url or "") if device else ""
+        return bool(repository) and url.rstrip("/").lower() == repository
+
+    def by_title(entry: er.RegistryEntry) -> bool:
+        return attributes(entry).get("title") == name
+
+    for matches in (by_release_url, by_icon, by_device_name, by_device_url, by_title):
+        for entry in candidates:
+            if matches(entry):
+                return entry
     return None
 
 
