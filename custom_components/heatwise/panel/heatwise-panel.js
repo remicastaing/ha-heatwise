@@ -1175,6 +1175,8 @@ class HeatwisePanel extends LitElement {
     };
     this._viewMode = loadStoredViewMode();
     this._pairing = null;
+    // Spec 014 : compte à rebours de l'étape « voyant rouge allumé ? ».
+    this._heatingTestTimer = null;
     this._settingsDialog = null;
     this._radiatorDeletion = null;
     this._scheduleRoom = null;
@@ -1212,6 +1214,13 @@ class HeatwisePanel extends LitElement {
     window.removeEventListener("keydown", this._onKeyDown);
     // FR-005 : quitter le panneau arrête l'appairage (réseau refermé).
     this._stopSensorPairing();
+    // Spec 014 (FR-007) : quitter le panneau pendant un test de chauffe
+    // tente l'arrêt tout de suite ; l'arrêt automatique à 2 min de
+    // l'intégration couvre l'échec de cet envoi.
+    this._clearHeatingTestTimer();
+    if (this._heatingTestMayBeOn()) {
+      this._sendHeatingTest(false).catch(() => {});
+    }
     if (this._minuteTimer) {
       clearTimeout(this._minuteTimer);
       this._minuteTimer = null;
@@ -1659,6 +1668,8 @@ class HeatwisePanel extends LitElement {
         return "Plus aucune identité radio disponible pour un nouveau radiateur.";
       case "radiator_not_found":
         return "Ce radiateur n'existe plus.";
+      case "transmitter_id_already_used":
+        return "Cette identité radio est déjà attribuée à un radiateur.";
       default:
         return "Une erreur est survenue.";
     }
@@ -1713,6 +1724,8 @@ class HeatwisePanel extends LitElement {
   }
 
   async _abandonPairing() {
+    // Spec 014 : l'intégration arrête le radiateur avant de le dissocier.
+    this._clearHeatingTestTimer();
     const { transmitterId } = this._pairing;
     if (transmitterId != null) {
       try {
@@ -1739,13 +1752,16 @@ class HeatwisePanel extends LitElement {
         room_id: room.room_id,
         success: true,
       });
+      // Spec 014 : test de chauffe avant le nommage ; le nom par défaut
+      // est gardé pour l'écran de nommage.
       this._pairing = {
         room,
-        step: "name",
+        step: "test_on",
         transmitterId,
         name: response.default_name,
         error: null,
       };
+      await this._startHeatingTest();
     } catch (err) {
       this._pairing = {
         room,
@@ -1754,6 +1770,128 @@ class HeatwisePanel extends LitElement {
         error: this._pairingErrorMessage(err),
       };
     }
+  }
+
+  // --- Test de chauffe après appairage (spec 014) ---
+
+  _sendHeatingTest(heating) {
+    return this.hass.connection.sendMessagePromise({
+      type: "heatwise/test_radiator_heating",
+      transmitter_id: this._pairing.transmitterId,
+      heating,
+    });
+  }
+
+  _heatingTestMayBeOn() {
+    const pairing = this._pairing;
+    if (!pairing || pairing.transmitterId == null) return false;
+    if (!pairing.step.startsWith("test_")) return false;
+    return !(pairing.step === "test_off" && pairing.sent);
+  }
+
+  _clearHeatingTestTimer() {
+    if (this._heatingTestTimer) {
+      clearInterval(this._heatingTestTimer);
+      this._heatingTestTimer = null;
+    }
+  }
+
+  // Ordre de chauffe : premier envoi, « Renvoyer l'ordre », « Relancer le test ».
+  async _startHeatingTest() {
+    this._clearHeatingTestTimer();
+    this._pairing = {
+      ...this._pairing,
+      step: "test_on",
+      busy: true,
+      sent: false,
+      expiresAt: null,
+      error: null,
+    };
+    try {
+      const response = await this._sendHeatingTest(true);
+      this._pairing = {
+        ...this._pairing,
+        busy: false,
+        sent: true,
+        expiresAt: Date.now() + response.expires_in * 1000,
+      };
+      this._heatingTestTimer = setInterval(() => this._tickHeatingTest(), 1000);
+    } catch (err) {
+      this._pairing = {
+        ...this._pairing,
+        busy: false,
+        error: this._pairingErrorMessage(err),
+      };
+    }
+  }
+
+  _tickHeatingTest() {
+    const pairing = this._pairing;
+    if (!pairing || pairing.step !== "test_on") {
+      this._clearHeatingTestTimer();
+      return;
+    }
+    if (Date.now() >= pairing.expiresAt) {
+      // L'intégration a envoyé l'arrêt automatique (FR-008).
+      this._clearHeatingTestTimer();
+      this._pairing = { ...pairing, step: "test_expired", error: null };
+      return;
+    }
+    this.requestUpdate();
+  }
+
+  // Ordre d'arrêt : après « Oui, il est allumé » ou « Renvoyer l'ordre ».
+  async _sendHeatingOff() {
+    this._clearHeatingTestTimer();
+    this._pairing = {
+      ...this._pairing,
+      step: "test_off",
+      busy: true,
+      sent: false,
+      error: null,
+    };
+    try {
+      await this._sendHeatingTest(false);
+      this._pairing = { ...this._pairing, busy: false, sent: true };
+    } catch (err) {
+      this._pairing = {
+        ...this._pairing,
+        busy: false,
+        error: this._pairingErrorMessage(err),
+      };
+    }
+  }
+
+  _confirmHeatingOff() {
+    this._pairing = { ...this._pairing, step: "name", busy: false, error: null };
+  }
+
+  _heatingTestFailed(step) {
+    this._clearHeatingTestTimer();
+    this._pairing = { ...this._pairing, step, busy: false, error: null };
+  }
+
+  // « Reprendre l'appairage » : arrêt par précaution, puis retour au
+  // message d'appairage ; le « C'est fait » suivant réattribue la même
+  // identité radio (research R6).
+  async _resumePairing() {
+    this._pairing = { ...this._pairing, busy: true, error: null };
+    try {
+      await this._sendHeatingTest(false);
+    } catch (err) {
+      this._pairing = {
+        ...this._pairing,
+        busy: false,
+        error: this._pairingErrorMessage(err),
+      };
+      return;
+    }
+    this._pairing = {
+      room: this._pairing.room,
+      step: "intro",
+      transmitterId: null,
+      error: null,
+    };
   }
 
   _onPairingNameInput(event) {
@@ -3501,9 +3639,148 @@ class HeatwisePanel extends LitElement {
     `;
   }
 
+  _renderHeatingTestDialog() {
+    const { room, step, error, busy, sent, expiresAt } = this._pairing;
+    const abandon = html`
+      <button class="button-secondary" ?disabled=${busy} @click=${this._abandonPairing}>
+        Abandonner
+      </button>
+    `;
+    let hints;
+    let actions;
+
+    if (step === "test_on" && !sent) {
+      hints = busy
+        ? html`<p class="hint">Envoi de l'ordre de chauffe…</p>`
+        : html`<p class="hint">L'ordre de chauffe n'a pas pu être envoyé.</p>`;
+      actions = html`
+        ${abandon}
+        <button class="button-primary" ?disabled=${busy} @click=${this._startHeatingTest}>
+          Réessayer
+        </button>
+      `;
+    } else if (step === "test_on") {
+      const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+      hints = html`
+        <p class="hint">
+          Heatwise vient d'envoyer un ordre de chauffe à ce radiateur. Le voyant
+          rouge du récepteur est-il allumé ?
+        </p>
+        <p class="hint">Arrêt automatique dans ${remaining} s.</p>
+      `;
+      actions = html`
+        ${abandon}
+        <button
+          class="button-secondary"
+          ?disabled=${busy}
+          @click=${() => this._heatingTestFailed("test_on_failed")}
+        >
+          Non
+        </button>
+        <button class="button-primary" ?disabled=${busy} @click=${this._sendHeatingOff}>
+          Oui
+        </button>
+      `;
+    } else if (step === "test_off" && !sent) {
+      hints = busy
+        ? html`<p class="hint">Envoi de l'ordre d'arrêt…</p>`
+        : html`<p class="hint">
+            L'ordre d'arrêt n'a pas pu être envoyé. Heatwise arrêtera de
+            lui-même le radiateur au plus tard 2 minutes après l'ordre de
+            chauffe.
+          </p>`;
+      actions = html`
+        ${abandon}
+        <button class="button-primary" ?disabled=${busy} @click=${this._sendHeatingOff}>
+          Réessayer
+        </button>
+      `;
+    } else if (step === "test_off") {
+      hints = html`
+        <p class="hint">
+          Heatwise vient d'envoyer l'ordre d'arrêt. Le voyant rouge du récepteur
+          s'est-il éteint ?
+        </p>
+      `;
+      actions = html`
+        ${abandon}
+        <button
+          class="button-secondary"
+          @click=${() => this._heatingTestFailed("test_off_failed")}
+        >
+          Non
+        </button>
+        <button class="button-primary" @click=${this._confirmHeatingOff}>Oui</button>
+      `;
+    } else if (step === "test_on_failed") {
+      hints = html`
+        <p class="hint">
+          Le radiateur n'a pas réagi à l'ordre de chauffe. Vous pouvez renvoyer
+          l'ordre, reprendre l'appairage depuis le début ou abandonner l'ajout.
+        </p>
+      `;
+      actions = html`
+        ${abandon}
+        <button class="button-secondary" ?disabled=${busy} @click=${this._resumePairing}>
+          Reprendre l'appairage
+        </button>
+        <button class="button-primary" ?disabled=${busy} @click=${this._startHeatingTest}>
+          Renvoyer l'ordre
+        </button>
+      `;
+    } else if (step === "test_off_failed") {
+      hints = html`
+        <p class="hint">
+          Le radiateur n'a pas réagi à l'ordre d'arrêt. Le récepteur coupera de
+          lui-même le relais au bout d'une heure sans ordre.
+        </p>
+      `;
+      actions = html`
+        ${abandon}
+        <button class="button-primary" ?disabled=${busy} @click=${this._sendHeatingOff}>
+          Renvoyer l'ordre
+        </button>
+      `;
+    } else {
+      // step === "test_expired"
+      hints = html`
+        <p class="hint">
+          Le test a expiré : Heatwise a arrêté le radiateur. Relancez le test
+          pour vérifier à nouveau le voyant rouge du récepteur.
+        </p>
+      `;
+      actions = html`
+        ${abandon}
+        <button class="button-primary" ?disabled=${busy} @click=${this._startHeatingTest}>
+          Relancer le test
+        </button>
+      `;
+    }
+
+    return html`
+      <div class="dialog-overlay">
+        <div class="dialog">
+          <div class="dialog-header">
+            <div>
+              <h2>Test de chauffe</h2>
+              <span class="dialog-subtitle">— ${room.name}</span>
+            </div>
+          </div>
+          ${hints}
+          ${error ? html`<p class="dialog-error">${error}</p>` : ""}
+          <div class="dialog-actions">${actions}</div>
+        </div>
+      </div>
+    `;
+  }
+
   _renderPairingDialog() {
     const { room, step, error } = this._pairing;
     const busy = step === "sending" || step === "confirming";
+
+    if (step.startsWith("test_")) {
+      return this._renderHeatingTestDialog();
+    }
 
     if (step === "name") {
       return html`

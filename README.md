@@ -111,7 +111,13 @@ dongle ci-dessus) :
       thermostat qui pilote actuellement ce radiateur) → « C'est fait » ;
    2. vérifier que le voyant TH du récepteur passe au vert fixe, puis
       « Appairage réussi » (ou « Réessayer »/« Abandonner » sinon) ;
-   3. ajuster le nom proposé par défaut (« <pièce> n°x ») si besoin, puis
+   3. **test de chauffe** : Heatwise envoie un ordre de chauffe ; vérifier
+      que le voyant rouge du récepteur s'allume (« Oui »), puis qu'il
+      s'éteint après l'ordre d'arrêt (« Oui »). Sur « Non », renvoyer
+      l'ordre, reprendre l'appairage ou abandonner. Le radiateur est arrêté
+      de lui-même au plus tard 2 min après l'ordre de chauffe (même si le
+      panneau est fermé) ; abandonner l'arrête puis le dissocie ;
+   4. ajuster le nom proposé par défaut (« <pièce> n°x ») si besoin, puis
       « Enregistrer ».
 4. Le bouton « paramètres » (icône ⚙) de chaque pièce liste ses
    radiateurs, chacun avec une icône indiquant s'il chauffe. Cliquer sur
@@ -295,7 +301,9 @@ une itération future a besoin d'automatisations ou de cartes Lovelace).
   d'émettre juste après un renvoi, la coupure matérielle n'interviendrait
   qu'une heure plus tard (environ 2 h de chauffe au pire).
 - Au démarrage de Home Assistant, tous les radiateurs déjà enregistrés
-  reçoivent un ordre d'arrêt, quel que soit leur état avant l'arrêt ; la
+  reçoivent un ordre d'arrêt, quel que soit leur état avant l'arrêt (de
+  même qu'un radiateur dont le test de chauffe était en cours pendant un
+  ajout) ; la
   régulation reprend ensuite pièce par pièce, sur des mesures valides.
   Au déchargement de l'intégration, la régulation s'arrête et les
   radiateurs reçoivent un ordre d'arrêt.

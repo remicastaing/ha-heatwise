@@ -38,6 +38,18 @@ MANUAL_HEATING_SECONDS = 3600
 
 _TIMERS_KEY = f"{DOMAIN}_radiator_auto_off_timers"
 
+# Spec 014 : test de chauffe d'un radiateur fraîchement appairé, pas
+# encore enregistré. Arrêt automatique côté intégration (research R1),
+# jamais de renouvellement de l'ordre de chauffe (FR-012).
+HEATING_TEST_SECONDS = 120
+_TEST_TIMERS_KEY = f"{DOMAIN}_heating_test_timers"
+# Identités en test persistées dans un `Store` à part (research R4) :
+# `async_force_stop_all` les arrête au démarrage. Séparé de
+# `heatwise.radiators` pour ne pas entrer en concurrence avec les
+# écritures d'état de la régulation, ce `Store` n'ayant pas de verrou
+# (analyse M2).
+TESTS_STORAGE_KEY = f"{DOMAIN}.heating_tests"
+
 # Échéance d'une chauffe manuelle déléguée à l'appelant (spec 011,
 # research R3) : reçoit `(radiator_id, token)`.
 ExpireCallback = Callable[[str, object], Awaitable[None]]
@@ -94,6 +106,29 @@ async def _async_load(hass: HomeAssistant) -> dict[str, Any]:
     # migration).
     data.setdefault("reserved_transmitter_ids", [])
     return data
+
+
+def _tests_store(hass: HomeAssistant) -> Store:
+    return Store(hass, STORAGE_VERSION, TESTS_STORAGE_KEY)
+
+
+async def async_list_heating_tests(hass: HomeAssistant) -> list[int]:
+    """Identités radio ayant reçu un ordre de chauffe de test pas encore
+    suivi d'un arrêt transmis (spec 014)."""
+    data = await _tests_store(hass).async_load()
+    return list(data["transmitter_ids"]) if data else []
+
+
+async def _async_update_heating_tests(
+    hass: HomeAssistant, *, add: int | None = None, remove: int | None = None
+) -> None:
+    # Lecture puis écriture sans autre `await` entre les deux (analyse M2).
+    ids = await async_list_heating_tests(hass)
+    if add is not None and add not in ids:
+        ids.append(add)
+    if remove is not None and remove in ids:
+        ids.remove(remove)
+    await _tests_store(hass).async_save({"transmitter_ids": ids})
 
 
 def _normalize(name: str) -> str:
@@ -173,13 +208,34 @@ async def compute_default_name(hass: HomeAssistant, room_name: str) -> str:
 
 
 async def async_save_radiator(
-    hass: HomeAssistant, transmitter_id: int, room_id: str, name: str
+    hass: HomeAssistant,
+    transmitter_id: int,
+    room_id: str,
+    name: str,
+    *,
+    client: RFPlayerClient | None = None,
 ) -> dict[str, Any]:
     """Enregistre un nouveau radiateur après appairage confirmé (FR-009 à
-    FR-011)."""
+    FR-011).
+
+    Spec 014 (research R6) : si un test de chauffe est encore actif pour
+    cette identité — impossible depuis le panneau, défensif —, un arrêt
+    est d'abord tenté. Dongle injoignable : l'identité reste en test et sa
+    minuterie armée, l'arrêt sera retenté à l'échéance ou au démarrage.
+    """
     trimmed = name.strip()
     if not trimmed:
         raise InvalidRadiatorNameError()
+
+    if client is not None and transmitter_id in await async_list_heating_tests(hass):
+        try:
+            await _async_send_test_stop(hass, client, transmitter_id)
+        except RFPlayerUnreachable:
+            _LOGGER.warning(
+                "Dongle injoignable : impossible d'arrêter le test de chauffe "
+                "de l'identité %s avant son enregistrement",
+                transmitter_id,
+            )
 
     data = await _async_load(hass)
     normalized = _normalize(trimmed)
@@ -231,18 +287,18 @@ def cancel_auto_off(hass: HomeAssistant, radiator_id: str) -> None:
 
 @callback
 def async_cancel_all_auto_off_timers(hass: HomeAssistant) -> None:
-    """Annule toutes les minuteries de chauffe manuelle en cours.
+    """Annule toutes les minuteries de chauffe manuelle en cours, et
+    celles des tests de chauffe (spec 014).
 
     À appeler à l'`unload` de l'entrée, **avant** de fermer le
     `RFPlayerClient` : une minuterie planifiée par `async_set_heating`
     referme sur l'instance de client courante et ne doit jamais s'exécuter
     après sa fermeture (cf. `research.md`).
     """
-    timers: dict[str, _AutoOff] | None = hass.data.pop(_TIMERS_KEY, None)
-    if not timers:
-        return
-    for timer in timers.values():
-        timer.unsub()
+    for key in (_TIMERS_KEY, _TEST_TIMERS_KEY):
+        timers: dict[Any, _AutoOff] | None = hass.data.pop(key, None)
+        for timer in (timers or {}).values():
+            timer.unsub()
 
 
 @callback
@@ -387,6 +443,133 @@ async def async_force_stop_all(hass: HomeAssistant, client: RFPlayerClient | Non
             changed = True
     if changed:
         await _store(hass).async_save(data)
+
+    # Spec 014 (research R4) : identités en test de chauffe au moment du
+    # redémarrage ou du déchargement, inconnues du `Store` des radiateurs.
+    test_ids = await async_list_heating_tests(hass)
+    for transmitter_id in test_ids:
+        if client is not None:
+            try:
+                await client.async_set_heating(transmitter_id, heating=False)
+            except RFPlayerUnreachable:
+                _LOGGER.warning(
+                    "Dongle injoignable : impossible d'arrêter le test de "
+                    "chauffe de l'identité %s",
+                    transmitter_id,
+                )
+    if test_ids:
+        await _tests_store(hass).async_save({"transmitter_ids": []})
+
+
+@callback
+def _cancel_test_timer(hass: HomeAssistant, transmitter_id: int) -> None:
+    timers: dict[int, _AutoOff] | None = hass.data.get(_TEST_TIMERS_KEY)
+    if timers:
+        timer = timers.pop(transmitter_id, None)
+        if timer is not None:
+            timer.unsub()
+
+
+async def _async_check_unregistered(hass: HomeAssistant, transmitter_id: int) -> None:
+    """Refuse l'identité d'un radiateur enregistré ou réservé : la
+    commande de test ne doit jamais piloter un radiateur existant hors des
+    règles de la chauffe manuelle et de la régulation (FR-011, R2)."""
+    data = await _async_load(hass)
+    if transmitter_id in data["reserved_transmitter_ids"] or any(
+        r["transmitter_id"] == transmitter_id for r in data["radiators"]
+    ):
+        raise TransmitterIdAlreadyUsedError()
+
+
+async def async_start_heating_test(
+    hass: HomeAssistant, client: RFPlayerClient | None, transmitter_id: int
+) -> int:
+    """Envoie l'ordre de chauffe de test à une identité pas encore
+    enregistrée (spec 014, FR-002) et (ré)arme l'arrêt automatique.
+
+    `RFPlayerUnreachable` est propagée sans rien changer (FR-009) : une
+    minuterie déjà armée par un envoi précédent reste en place. Retourne
+    la durée avant l'arrêt automatique, en secondes.
+    """
+    if client is None:
+        raise RFPlayerNotConfiguredError()
+    await _async_check_unregistered(hass, transmitter_id)
+
+    await client.async_set_heating(transmitter_id, heating=True)
+    _cancel_test_timer(hass, transmitter_id)
+    await _async_update_heating_tests(hass, add=transmitter_id)
+
+    token = object()
+
+    async def _async_expire(_now: Any) -> None:
+        timers = hass.data.get(_TEST_TIMERS_KEY) or {}
+        timer = timers.get(transmitter_id)
+        if timer is None or timer.token is not token:
+            return
+        del timers[transmitter_id]
+        try:
+            await client.async_set_heating(transmitter_id, heating=False)
+        except RFPlayerUnreachable:
+            # L'identité reste persistée : arrêt retenté au démarrage, et
+            # le récepteur coupe de lui-même au bout d'1 h sans trame.
+            _LOGGER.warning(
+                "Dongle injoignable : impossible d'envoyer l'arrêt "
+                "automatique du test de chauffe de l'identité %s",
+                transmitter_id,
+            )
+            return
+        await _async_update_heating_tests(hass, remove=transmitter_id)
+
+    unsub = async_call_later(hass, HEATING_TEST_SECONDS, _async_expire)
+    hass.data.setdefault(_TEST_TIMERS_KEY, {})[transmitter_id] = _AutoOff(unsub, token)
+    return HEATING_TEST_SECONDS
+
+
+async def _async_send_test_stop(
+    hass: HomeAssistant, client: RFPlayerClient, transmitter_id: int
+) -> None:
+    await client.async_set_heating(transmitter_id, heating=False)
+    _cancel_test_timer(hass, transmitter_id)
+    await _async_update_heating_tests(hass, remove=transmitter_id)
+
+
+async def async_stop_heating_test(
+    hass: HomeAssistant, client: RFPlayerClient | None, transmitter_id: int
+) -> None:
+    """Envoie l'ordre d'arrêt du test de chauffe (spec 014, FR-003).
+
+    Idempotent : accepté même sans test actif. Si l'envoi échoue
+    (`RFPlayerUnreachable`, propagée), la minuterie reste armée et
+    l'identité persistée (FR-009).
+    """
+    if client is None:
+        raise RFPlayerNotConfiguredError()
+    await _async_check_unregistered(hass, transmitter_id)
+    await _async_send_test_stop(hass, client, transmitter_id)
+
+
+async def async_abandon_pairing(
+    hass: HomeAssistant, client: RFPlayerClient | None, transmitter_id: int
+) -> None:
+    """Abandon d'un ajout de radiateur (spec 003 FR-012, spec 014 FR-007) :
+    arrêt **puis** dissociation, jamais l'inverse (spec 004 R1). Les deux
+    ordres sont best-effort ; si l'arrêt n'a pas pu partir, l'identité
+    reste en test pour être arrêtée à l'échéance ou au démarrage."""
+    if client is None:
+        return
+    try:
+        await _async_send_test_stop(hass, client, transmitter_id)
+    except RFPlayerUnreachable:
+        _LOGGER.warning(
+            "Dongle injoignable : impossible d'arrêter l'identité %s à "
+            "l'abandon de l'appairage",
+            transmitter_id,
+        )
+    try:
+        await client.async_unpair(transmitter_id)
+    except RFPlayerUnreachable:
+        # Best-effort (FR-012 de la spec 003 : rien n'a été persisté).
+        pass
 
 
 async def async_delete_radiator(

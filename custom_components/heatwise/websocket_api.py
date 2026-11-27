@@ -198,7 +198,11 @@ async def handle_confirm_radiator_pairing(hass, connection, msg):
 async def handle_save_radiator(hass, connection, msg):
     try:
         radiator = await radiators_module.async_save_radiator(
-            hass, msg["transmitter_id"], msg["room_id"], msg["name"]
+            hass,
+            msg["transmitter_id"],
+            msg["room_id"],
+            msg["name"],
+            client=_client(hass),
         )
     except radiators_module.InvalidRadiatorNameError:
         connection.send_error(msg["id"], "invalid_name", "Le nom est obligatoire.")
@@ -228,15 +232,57 @@ async def handle_save_radiator(hass, connection, msg):
 @websocket_api.require_admin
 @websocket_api.async_response
 async def handle_abandon_radiator_pairing(hass, connection, msg):
-    client = _client(hass)
-    if client is not None:
-        try:
-            await client.async_unpair(msg["transmitter_id"])
-        except RFPlayerUnreachable:
-            # Best-effort : ne pas bloquer l'abandon sur l'injoignabilité
-            # du dongle (FR-012 — rien n'a de toute façon été persisté).
-            pass
+    # Spec 014 (FR-007) : arrêt puis dissociation, en best-effort — ne pas
+    # bloquer l'abandon sur l'injoignabilité du dongle (FR-012 de la spec
+    # 003 : rien n'a de toute façon été persisté).
+    await radiators_module.async_abandon_pairing(
+        hass, _client(hass), msg["transmitter_id"]
+    )
     connection.send_result(msg["id"], {"acknowledged": True})
+
+
+@websocket_api.websocket_command(
+    {
+        "type": "heatwise/test_radiator_heating",
+        vol.Required("transmitter_id"): vol.All(int, vol.Range(min=0, max=255)),
+        "heating": bool,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def handle_test_radiator_heating(hass, connection, msg):
+    """Test de chauffe d'un radiateur appairé mais pas encore enregistré
+    (spec 014, contracts/websocket-api.md)."""
+    client = _client(hass)
+    transmitter_id = msg["transmitter_id"]
+    try:
+        if msg["heating"]:
+            expires_in = await radiators_module.async_start_heating_test(
+                hass, client, transmitter_id
+            )
+        else:
+            await radiators_module.async_stop_heating_test(hass, client, transmitter_id)
+            expires_in = 0
+    except radiators_module.RFPlayerNotConfiguredError:
+        connection.send_error(
+            msg["id"], "rfplayer_not_configured", "Aucun port RFPlayer configuré."
+        )
+        return
+    except RFPlayerUnreachable:
+        connection.send_error(
+            msg["id"], "rfplayer_unreachable", "Le dongle RFPlayer est injoignable."
+        )
+        return
+    except radiators_module.TransmitterIdAlreadyUsedError:
+        connection.send_error(
+            msg["id"],
+            "transmitter_id_already_used",
+            "Cette identité radio est déjà attribuée à un radiateur.",
+        )
+        return
+    connection.send_result(
+        msg["id"], {"heating": msg["heating"], "expires_in": expires_in}
+    )
 
 
 @websocket_api.websocket_command({"type": "heatwise/list_radiators", "room_id": str})
@@ -962,6 +1008,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, handle_confirm_radiator_pairing)
     websocket_api.async_register_command(hass, handle_save_radiator)
     websocket_api.async_register_command(hass, handle_abandon_radiator_pairing)
+    websocket_api.async_register_command(hass, handle_test_radiator_heating)
     websocket_api.async_register_command(hass, handle_list_radiators)
     websocket_api.async_register_command(hass, handle_set_radiator_heating)
     websocket_api.async_register_command(hass, handle_set_room_manual_heating)
